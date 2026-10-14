@@ -118,11 +118,15 @@ def main():
             assert status==415,(status,body)
             status,body,_=req(upload,'POST',data,{'Content-Type':'application/octet-stream'})
             assert status==403,(status,body)
+            status,body,_=req(upload,'POST',data,{**headers,'Origin':'http://malicious-attacker.com'})
+            assert status==403,(status,body)
+            status,body,_=req(upload,'POST',data,{**headers,'Origin':f'http://127.0.0.1:{port}'})
+            assert status==409,(status,body)
             status,body,_=req(base+'/api/v1/images/../../etc/passwd')
             assert status in (400,404),(status,body)
             # Persistence after an actual restart
             proc.terminate(); proc.wait(timeout=6)
-            proc=subprocess.Popen([exe,'--data-dir',temp,'--web-dir',web,'--port',str(port)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            proc=subprocess.Popen([exe,'--host','127.0.0.1','--data-dir',temp,'--web-dir',web,'--port',str(port)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             for _ in range(80):
                 try:
                     status,body,_=req(base+'/api/v1/images')
@@ -131,7 +135,7 @@ def main():
             else: raise AssertionError('Restart failed')
             assert len(json.loads(body)['data'])==3
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: PNG/JPEG/TIFF, checksum, preservation, derivatives, CSV, duplicate, invalid, header, restart')
+            print('RIZOMA smoke PASS: PNG/JPEG/TIFF, checksum, preservation, derivatives, CSV, duplicate, origin/CSRF, invalid, header, restart')
 
         finally:
             if proc.poll() is None:

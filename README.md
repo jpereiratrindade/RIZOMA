@@ -35,10 +35,20 @@ Na pasta do projeto:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-./build/rizoma-server --data-dir ./var --web-dir ./web --port 8089
+
+# 1. Apenas máquina local (padrão seguro loopback):
+./build/rizoma-server --host 127.0.0.1 --data-dir ./var --web-dir ./web --port 8089
+
+# 2. Acesso via rede local (acessível por outros dispositivos na LAN do laboratório):
+./build/rizoma-server --host 0.0.0.0 --data-dir ./var --web-dir ./web --port 8089
+# Ou usando o script run.sh:
+RIZOMA_HOST=0.0.0.0 ./run.sh
 ```
 
-Abrir: **http://127.0.0.1:8089**. A interface não envia arquivos a serviços externos. O servidor está **deliberadamente limitado à interface loopback** `127.0.0.1`.
+- **Acesso local:** [http://127.0.0.1:8089](http://127.0.0.1:8089)
+- **Acesso via rede local:** `http://<IP_DA_MAQUINA>:8089` (ex.: `http://10.163.80.176:8089`)
+
+A interface não envia arquivos a serviços externos. Por padrão seguro, o servidor se liga exclusivamente a `127.0.0.1`. Ao utilizar `--host 0.0.0.0`, o serviço fica disponível para computadores e estações conectadas à mesma sub-rede local.
 
 Para preparar a área privada de produção, crie diretório de armazenamento em disco confiável e mantenha `var/` fora do Git. O código, os testes e a interface são versionados; imagens reais, banco de dados e derivados não devem entrar no repositório público.
 
@@ -81,7 +91,7 @@ Arquivo recebido (original, SHA-256, privado)
 
 ## Limitações intencionais e exigências antes de uso multiusuário
 
-1. **Somente loopback.** Não mudar o código para `0.0.0.0` nem expor diretamente na rede: faltam autenticação, autorização por usuário/projeto, HTTPS, políticas de compartilhamento, quotas e controle de abuso.
+1. **Rede e exposição controlada.** O padrão seguro de execução é `127.0.0.1` (loopback). A opção `--host 0.0.0.0` permite acesso em rede local restrita (laboratório/bancada), mas não deve ser exposta à internet aberta: faltam autenticação de usuários, autorização granular por projeto, HTTPS obrigatório e controle de quotas.
 2. **Upload buffered.** Cada requisição é recebida em memória até 12 MiB e a transformação ocorre sincronamente. A próxima etapa deverá oferecer ingestão em fluxo, staging persistente, verificação e filas para maiores volumes.
 3. **Formatos e ciência.** Suporte nativo a PNG, JPEG e TIFF (RGB/escala de cinza/paleta) implementado; formatos multicanal avançados, profundidades superiores a 8 bits no pipeline científico, calibração métrica e metadados instrumentais específicos (tags científicas de scanner/EXIF) serão aprofundados na etapa de caracterização.
 4. **Retenção.** Diretórios privados e WAL não bastam: backups verificados, política de retenção e recuperação de arquivos órfãos precisam ser implementados.

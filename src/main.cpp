@@ -59,7 +59,7 @@ constexpr int THUMB_MAX=1280;
 constexpr const char* PIPELINE="rizoma-inspection-0.2.0";
 struct Failure : std::runtime_error {using std::runtime_error::runtime_error;};
 struct Raster {int w=0,h=0;std::vector<unsigned char> rgba;};
-struct App {fs::path root,web; unsigned short port=8089; std::atomic<int>active{0};};
+struct App {fs::path root,web; std::string host="127.0.0.1"; unsigned short port=8089; std::atomic<int>active{0};};
 static std::string utc(){auto t=std::time(nullptr); std::tm v{};gmtime_r(&t,&v);char buf[32];std::strftime(buf,sizeof(buf),"%Y-%m-%dT%H:%M:%SZ",&v);return buf;}
 static std::string esc(std::string_view s){std::string out;out.reserve(s.size()+8);for(unsigned char c:s){switch(c){case '"':out+="\\\"";break;case '\\':out+="\\\\";break;case '\n':out+="\\n";break;case '\r':out+="\\r";break;case '\t':out+="\\t";break;default:if(c<32){char b[7];std::snprintf(b,sizeof(b),"\\u%04x",c);out+=b;}else out+=char(c);}}return out;}
 static std::string q(std::string_view s){return "\""+esc(s)+"\"";}
@@ -225,7 +225,13 @@ static void session(tcp::socket socket,App& app){
  auto req=parser.release();Response r=problem(req.version(),http::status::internal_server_error,"Server error");
  // This first operational slice is bound exclusively to loopback; external authentication is NOT implemented.
  const std::string origin=std::string(req[http::field::origin]);
- if(!origin.empty()&&origin!="http://localhost:"+std::to_string(app.port)&&origin!="http://127.0.0.1:"+std::to_string(app.port))r=problem(req.version(),http::status::forbidden,"Cross-origin requests are disabled");
+ const std::string host_hdr=std::string(req[http::field::host]);
+ bool origin_ok = origin.empty() ||
+                  origin == "http://" + host_hdr ||
+                  origin == "http://localhost:" + std::to_string(app.port) ||
+                  origin == "http://127.0.0.1:" + std::to_string(app.port) ||
+                  (!app.host.empty() && origin == "http://" + app.host + ":" + std::to_string(app.port));
+ if(!origin_ok)r=problem(req.version(),http::status::forbidden,"Cross-origin requests are disabled");
  else try{r=handle(app,req);}catch(const std::exception& e){std::cerr<<"Request error: "<<e.what()<<"\n";r=problem(req.version(),http::status::internal_server_error,"Unexpected server error");}
  http::write(stream,r,ec);stream.socket().shutdown(tcp::socket::shutdown_both,ec);
  }catch(const std::exception& e){std::cerr<<"Connection error: "<<e.what()<<"\n";}
@@ -233,8 +239,12 @@ static void session(tcp::socket socket,App& app){
 int main(int argc,char** argv){try{
  ::umask(0077);App app;app.root="./var";app.web="./web";
  TIFFSetWarningHandler(nullptr);TIFFSetErrorHandler(nullptr);
- for(int i=1;i<argc;i++){std::string a=argv[i];if(a=="--data-dir"&&i+1<argc)app.root=argv[++i];else if(a=="--web-dir"&&i+1<argc)app.web=argv[++i];else if(a=="--port"&&i+1<argc){int port=std::stoi(argv[++i]);if(port<1024||port>65535)throw Failure("Port out of range");app.port=static_cast<unsigned short>(port);}else throw Failure("Usage: rizoma-server [--data-dir DIRECTORY] [--web-dir DIRECTORY] [--port 1024..65535]");}
- initialize(app);asio::io_context io;tcp::acceptor acceptor(io,{asio::ip::make_address("127.0.0.1"),app.port});std::cout<<"RIZOMA v0.2.0 — http://127.0.0.1:"<<app.port<<" (loopback only)\n"<<"Data dir: "<<fs::absolute(app.root)<<"\n"<<std::flush;
+ for(int i=1;i<argc;i++){std::string a=argv[i];if(a=="--data-dir"&&i+1<argc)app.root=argv[++i];else if(a=="--web-dir"&&i+1<argc)app.web=argv[++i];else if(a=="--host"&&i+1<argc)app.host=argv[++i];else if(a=="--port"&&i+1<argc){int port=std::stoi(argv[++i]);if(port<1024||port>65535)throw Failure("Port out of range");app.port=static_cast<unsigned short>(port);}else throw Failure("Usage: rizoma-server [--host IP] [--data-dir DIRECTORY] [--web-dir DIRECTORY] [--port 1024..65535]");}
+ initialize(app);asio::io_context io;
+ boost::system::error_code ec;auto addr=asio::ip::make_address(app.host,ec);
+ if(ec)throw Failure("Invalid IP address for --host: "+app.host);
+ tcp::acceptor acceptor(io,{addr,app.port});
+ std::cout<<"RIZOMA v0.2.0 — http://"<<app.host<<":"<<app.port<<(app.host=="127.0.0.1"?" (loopback only)":app.host=="0.0.0.0"?" (all interfaces / LAN)":" (local network)")<<"\n"<<"Data dir: "<<fs::absolute(app.root)<<"\n"<<std::flush;
  for(;;){tcp::socket s(io);acceptor.accept(s);if(app.active.load()>=4){s.close();continue;}++app.active;std::thread(session,std::move(s),std::ref(app)).detach();}
  }catch(const std::exception& e){std::cerr<<"RIZOMA fatal: "<<e.what()<<"\n";return 1;}}
 

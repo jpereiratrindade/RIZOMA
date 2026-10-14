@@ -19,5 +19,4 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-exec ./build/rizoma-server --data-dir "${RIZOMA_DATA_DIR:-./var}" --web-dir ./web --port "${RIZOMA_PORT:-8089}"
+exec ./build/rizoma-server --host "${RIZOMA_HOST:-127.0.0.1}" --data-dir "${RIZOMA_DATA_DIR:-./var}" --web-dir ./web --port "${RIZOMA_PORT:-8089}" "$@"
