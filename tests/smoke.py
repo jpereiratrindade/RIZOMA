@@ -103,6 +103,9 @@ def main():
             status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original')
             assert status==200 and payload.startswith(b'II*\x00'),status
             assert resp_hdrs.get('Content-Type')=='image/tiff'
+            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original-view')
+            assert status==200 and payload.startswith(b'\x89PNG'),status
+            assert resp_hdrs.get('Content-Type')=='image/png'
             status,payload,_=req(base+'/api/v1/images/'+item_tif['id']+'/preview')
             assert status==200 and payload.startswith(b'\x89PNG'),status
             status,body,_=req(base+'/api/v1/images')

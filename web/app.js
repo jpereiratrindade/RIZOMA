@@ -29,8 +29,65 @@ if(!items.length){$('gallery').innerHTML=`<div class="empty"><svg viewBox="0 0 5
 $('gallery').innerHTML=items.map(x=>`<button class="image-card" type="button" data-image="${h(x.id)}" aria-label="Inspecionar ${h(x.filename)}"><div class="thumb"><img src="/api/v1/images/${h(x.id)}/preview" alt="" loading="lazy"><span class="thumb-tag">${number.format(x.width)} × ${number.format(x.height)}</span></div><div class="cardbody"><strong title="${h(x.filename)}">${h(x.filename)}</strong><p>${h(x.sample_id||'Sem amostra')} · ${h(x.capture_date||x.created_at.slice(0,10))}</p><div class="card-foot"><span class="quality ${x.qc_state==='REVIEW'?'':'alert'}">${x.qc_state==='REVIEW'?'Inspeção visual':x.qc_state==='LOW_LIGHT'?'Pouca luz':'Excesso de luz'}</span><span class="open-link">Abrir ↗</span></div></div></button>`).join('');for(const item of document.querySelectorAll('[data-image]'))item.onclick=()=>openInspect(item.dataset.image);
 }
 async function refresh(){try{const res=await api('/api/v1/images');images=res.data||[];render();$('service-state').textContent='Serviço local ativo';$('service-state').parentElement.classList.remove('offline');}catch(e){$('service-state').textContent='Servidor indisponível';$('service-state').parentElement.classList.add('offline');$('gallery').innerHTML=`<div class="empty"><h3>Não foi possível consultar o servidor</h3><p>${h(e.message)}. Confira se o RIZOMA está em execução.</p></div>`;}}
-function openInspect(id){current=images.find(x=>x.id===id);if(!current)return;mode='original';$('inspect-title').textContent=current.filename;$('inspector').classList.remove('hidden');document.body.style.overflow='hidden';$('zoom').value='100';fillInspect();$('close-inspect').focus();}
-function fillInspect(){if(!current)return;for(const b of document.querySelectorAll('[data-image-mode]'))b.classList.toggle('active',b.dataset.imageMode===mode);$('inspect-image').src=`/api/v1/images/${current.id}/${mode}`;$('zoomvalue').textContent=$('zoom').value+'%';$('inspect-image').style.width=$('zoom').value+'%';$('inspect-metadata').innerHTML=[['Identificador',current.id],['Amostra',current.sample_id||'Não informada'],['Captura',current.capture_date||'Não informada'],['Dimensões',`${number.format(current.width)} × ${number.format(current.height)} px`],['Formato',current.format.toUpperCase()],['Tamanho',`${(current.bytes/1024/1024).toFixed(2)} MiB`],['Preparação',current.pipeline],['Estado científico','NÃO ANALISADA'],['SHA-256',current.sha256]].map(([label,value],i)=>`<div class="${i===8?'hash':''}"><dt>${h(label)}</dt><dd>${h(value)}</dd></div>`).join('');}
+function applyZoom(){
+  const z = Number($('zoom').value) || 100;
+  $('zoomvalue').textContent = z + '%';
+  const img = $('inspect-image');
+  if(!img) return;
+  if(z === 100){
+    img.style.maxWidth = '100%';
+    img.style.maxHeight = '46vh';
+    img.style.width = 'auto';
+    img.style.height = 'auto';
+  } else {
+    const stage = img.parentElement;
+    const stageW = Math.max(240, (stage ? stage.clientWidth : 600) - 48);
+    const stageH = Math.max(200, (stage ? stage.clientHeight : 350) - 48);
+    const aspect = (current && current.width && current.height) ? (current.width / current.height) : (img.naturalWidth ? img.naturalWidth / img.naturalHeight : 1);
+    let baseW = stageW;
+    if(baseW / aspect > stageH){
+      baseW = stageH * aspect;
+    }
+    img.style.maxWidth = 'none';
+    img.style.maxHeight = 'none';
+    img.style.width = Math.round(baseW * (z / 100)) + 'px';
+    img.style.height = 'auto';
+  }
+}
+function openInspect(id){
+  current = images.find(x => x.id === id);
+  if(!current) return;
+  mode = 'original';
+  $('inspect-title').textContent = current.filename;
+  $('inspector').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  $('zoom').value = '100';
+  fillInspect();
+  $('close-inspect').focus();
+}
+function fillInspect(){
+  if(!current) return;
+  for(const b of document.querySelectorAll('[data-image-mode]'))
+    b.classList.toggle('active', b.dataset.imageMode === mode);
+  const src = mode === 'original'
+    ? `/api/v1/images/${current.id}/original-view`
+    : `/api/v1/images/${current.id}/${mode}`;
+  const img = $('inspect-image');
+  img.src = src;
+  applyZoom();
+  $('inspect-metadata').innerHTML = [
+    ['Identificador', current.id],
+    ['Amostra', current.sample_id || 'Não informada'],
+    ['Captura', current.capture_date || 'Não informada'],
+    ['Dimensões', `${number.format(current.width)} × ${number.format(current.height)} px`],
+    ['Formato', current.format.toUpperCase()],
+    ['Tamanho', `${(current.bytes / 1024 / 1024).toFixed(2)} MiB`],
+    ['Preparação', current.pipeline],
+    ['Estado científico', 'NÃO ANALISADA'],
+    ['SHA-256', current.sha256],
+    ['Arquivo Original', `<a href="/api/v1/images/${current.id}/original" download="${h(current.filename)}" class="open-link" style="display:inline-flex;align-items:center;gap:4px">Baixar arquivo original (${current.format.toUpperCase()}) ↗</a>`]
+  ].map(([label, value], i) => `<div class="${i >= 8 ? 'hash' : ''}"><dt>${h(label)}</dt><dd>${value}</dd></div>`).join('');
+}
 function closeInspect(){$('inspector').classList.add('hidden');document.body.style.overflow='';current=null;}
 function filesSelected(files){selectedFiles=Array.from(files);$('file-count').textContent=selectedFiles.length?`${selectedFiles.length} arquivo(s) selecionado(s)`:'Nenhum arquivo selecionado';$('file-list').innerHTML=selectedFiles.map(f=>`<li>${h(f.name)} — ${(f.size/1024/1024).toFixed(2)} MiB</li>`).join('');$('send').disabled=selectedFiles.length===0;}
 async function upload(e){e.preventDefault();if(!selectedFiles.length)return;const btn=$('send');btn.disabled=true;const sample=$('sample-id').value.trim(),date=$('capture-date').value;const results=$('upload-results');results.innerHTML='';let successes=0;for(let i=0;i<selectedFiles.length;i++){const file=selectedFiles[i];const status=document.createElement('p');status.textContent=`Enviando ${i+1}/${selectedFiles.length}: ${file.name}…`;results.append(status);try{if(file.size>12*1024*1024)throw Error('Arquivo acima de 12 MiB');const url=new URL('/api/v1/images',location.href);url.searchParams.set('filename',file.name);url.searchParams.set('sample_id',sample);url.searchParams.set('capture_date',date);const body=await file.arrayBuffer();await api(url.pathname+url.search,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Rizoma-Client':'web-v0.2.0'},body});status.textContent=`✓ ${file.name}: original preservado e prévias geradas.`;successes++;}catch(e){status.classList.add('fail');status.textContent=`✕ ${file.name}: ${e.message}`;}}
@@ -38,6 +95,10 @@ btn.disabled=false;toast(`${successes} de ${selectedFiles.length} arquivo(s) reg
 for(const b of document.querySelectorAll('[data-view]'))b.addEventListener('click',()=>nav(b.dataset.view));
 $('hero-upload').onclick=()=>nav('recebimento');$('refresh').onclick=refresh;$('search').oninput=render;$('filter').onchange=render;$('upload-form').addEventListener('submit',upload);
 $('file-input').onchange=e=>filesSelected(e.target.files);const drop=$('dropzone');for(const event of ['dragenter','dragover'])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('drag');});for(const event of ['dragleave','drop'])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove('drag');});drop.addEventListener('drop',e=>filesSelected(e.dataTransfer.files));
-$('close-inspect').onclick=closeInspect;$('inspector').addEventListener('click',e=>{if(e.target===$('inspector'))closeInspect();});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('inspector').classList.contains('hidden'))closeInspect();});for(const b of document.querySelectorAll('[data-image-mode]'))b.onclick=()=>{mode=b.dataset.imageMode;fillInspect();};$('zoom').oninput=fillInspect;
+$('close-inspect').onclick=closeInspect;$('inspector').addEventListener('click',e=>{if(e.target===$('inspector'))closeInspect();});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('inspector').classList.contains('hidden'))closeInspect();});
+for(const b of document.querySelectorAll('[data-image-mode]'))b.onclick=()=>{mode=b.dataset.imageMode;fillInspect();};
+$('zoom').oninput=applyZoom;
+$('inspect-image').onload=applyZoom;
+
 $('menu').onclick=()=>{const open=$('sidebar').classList.toggle('open');$('mobile-scrim').classList.toggle('shown',open);$('menu').setAttribute('aria-expanded',String(open));};$('mobile-scrim').onclick=()=>{$('sidebar').classList.remove('open');$('mobile-scrim').classList.remove('shown');};
 const initial=location.hash.slice(1);nav(viewNames[initial]?initial:'acervo');refresh();
