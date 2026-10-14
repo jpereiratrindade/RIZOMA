@@ -12,21 +12,22 @@ Aplicação autônoma, inspirada na linguagem visual do **TRAMA** e **TRAMA-RS**
 
 - Servidor HTTP e núcleo de ingestão em **C++26** (compila em modo `-std=c++2c` no GCC 14 da demonstração).
 - Interface web responsiva, sem dependência de JavaScript de terceiros.
-- Recebimento de PNG e JPEG com limites de **12 MiB e 12 megapixels por arquivo**; validação de formato pelo conteúdo e decodificação efetiva.
+- Recebimento de PNG, JPEG e TIFF com limites de **12 MiB e 12 megapixels por arquivo**; validação de formato pelo conteúdo e decodificação efetiva.
 - Registro de nome, identificador opcional de amostra e data opcional de captura; altura/largura, tipo, bytes, SHA-256, data/hora UTC e versão da preparação.
 - Arquivos originais em armazenamento privado endereçado por hash; original nunca sobrescrito pela interface. SHA-256 é identificador do conteúdo, não comprovação de autoria ou garantia de retenção.
 - Prévia redimensionada e derivado em tons de cinza, ambos PNG e separados do original. São arquivos de **inspeção**, não dados científicos para medição.
 - Sinalização operacional de brilho médio da prévia: `REVIEW`, `LOW_LIGHT` e `HIGH_LIGHT`. Não há classificação de raízes nem teste automatizado de qualidade validado cientificamente.
 - SQLite com WAL, registro de evento de ingestão, consultas, filtros, inspeção visual e exportação de manifesto CSV.
-- Teste automatizado de HTTP, persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e acesso sem cabeçalho de aplicação.
+- Teste automatizado de HTTP, persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
 
 ## Executar (Fedora / Toolbox)
 
 Pacotes correspondentes em Fedora:
 
 ```bash
-sudo dnf install -y gcc-c++ cmake boost-devel sqlite-devel openssl-devel libpng-devel libjpeg-turbo-devel python3
+sudo dnf install -y gcc-c++ cmake boost-devel sqlite-devel openssl-devel libpng-devel libjpeg-turbo-devel libtiff-devel python3
 ```
+
 
 Na pasta do projeto:
 
@@ -82,7 +83,7 @@ Arquivo recebido (original, SHA-256, privado)
 
 1. **Somente loopback.** Não mudar o código para `0.0.0.0` nem expor diretamente na rede: faltam autenticação, autorização por usuário/projeto, HTTPS, políticas de compartilhamento, quotas e controle de abuso.
 2. **Upload buffered.** Cada requisição é recebida em memória até 12 MiB e a transformação ocorre sincronamente. A próxima etapa deverá oferecer ingestão em fluxo, staging persistente, verificação e filas para maiores volumes.
-3. **Formatos e ciência.** TIFF, multicanal, profundidades superiores a 8 bits, ICC/EXIF e metadados instrumentais específicos ainda não estão tratados na preparação. A aquisição deve ser caracterizada antes de escolher um pipeline científico.
+3. **Formatos e ciência.** Suporte nativo a PNG, JPEG e TIFF (RGB/escala de cinza/paleta) implementado; formatos multicanal avançados, profundidades superiores a 8 bits no pipeline científico, calibração métrica e metadados instrumentais específicos (tags científicas de scanner/EXIF) serão aprofundados na etapa de caracterização.
 4. **Retenção.** Diretórios privados e WAL não bastam: backups verificados, política de retenção e recuperação de arquivos órfãos precisam ser implementados.
 5. **Integridade.** Sem re-verificação periódica do hash durante a leitura, monitoramento de disco, assinatura de proveniência ou imutabilidade no nível do sistema de arquivos. SHA-256 é calculado na entrada e gravado no catálogo.
 6. **Qualidade.** O brilho é uma triagem operacional sobre a prévia, não uma classificação científica da imagem. Resampling por vizinho mais próximo é deliberadamente apenas para visualização.

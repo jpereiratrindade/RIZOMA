@@ -30,10 +30,11 @@ find_package(OpenSSL REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(PNG REQUIRED)
 find_package(JPEG REQUIRED)
+find_package(TIFF REQUIRED)
 find_package(Boost REQUIRED)
 
 add_executable(rizoma-server src/main.cpp)
-target_link_libraries(rizoma-server PRIVATE Threads::Threads OpenSSL::Crypto SQLite3::SQLite3 PNG::PNG JPEG::JPEG)
+target_link_libraries(rizoma-server PRIVATE Threads::Threads OpenSSL::Crypto SQLite3::SQLite3 PNG::PNG JPEG::JPEG TIFF::TIFF)
 target_compile_definitions(rizoma-server PRIVATE BOOST_ERROR_CODE_HEADER_ONLY BOOST_SYSTEM_NO_DEPRECATED)
 target_compile_options(rizoma-server PRIVATE -Wall -Wextra -Wpedantic)
 

@@ -88,10 +88,27 @@ def main():
             assert status==201,(status,body)
             item=json.loads(body)['data']
             assert item['format']=='jpeg' and item['width']==8 and item['height']==6
+            # A real, minimal 8x6 RGB TIFF fixture, independent from imaging Python packages.
+            tiff = base64.b64decode(
+                'SUkqAAgAAAAKAAABBAABAAAACAAAAAEBBAABAAAABgAAAAIBAwADAAAAhgAAAAMBAwABAAAAAQAAAAYB'
+                'AwABAAAAAgAAABEBBAABAAAAjAAAABUBAwABAAAAAwAAABYBBAABAAAABgAAABcBBAABAAAAkAAAABwB'
+                'AwABAAAAAQAAAAAAAAAIAAgACABklshklshklshklshklshklshklshklshklshklshklshklshklshkl'
+                'shklshklshklshklshklshklshklshklshklshklshklshklshklshklshklshklshklshklshklshkls'
+                'hklshklshklshklshklshklshklshklshklshklshklshklshklshklshklsg='
+            )
+            status,body,_=req(base+'/api/v1/images?filename=scanner_raiz.tif&sample_id=P01-RAIZ','POST',tiff,headers)
+            assert status==201,(status,body)
+            item_tif=json.loads(body)['data']
+            assert item_tif['format']=='tiff' and item_tif['width']==8 and item_tif['height']==6
+            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original')
+            assert status==200 and payload.startswith(b'II*\x00'),status
+            assert resp_hdrs.get('Content-Type')=='image/tiff'
+            status,payload,_=req(base+'/api/v1/images/'+item_tif['id']+'/preview')
+            assert status==200 and payload.startswith(b'\x89PNG'),status
             status,body,_=req(base+'/api/v1/images')
-            assert status==200 and len(json.loads(body)['data'])==2
+            assert status==200 and len(json.loads(body)['data'])==3
             status,body,_=req(base+'/api/v1/export/manifest.csv')
-            assert status==200 and b'P01-T2' in body and b'NOT_ANALYZED' in body
+            assert status==200 and b'P01-T2' in body and b'P01-RAIZ' in body and b'NOT_ANALYZED' in body
             status,body,_=req(upload,'POST',data,headers)
             assert status==409,(status,body)
             status,body,_=req(upload,'POST',b'<script>not an image</script>',headers)
@@ -109,9 +126,10 @@ def main():
                     if status==200: break
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
-            assert len(json.loads(body)['data'])==2
+            assert len(json.loads(body)['data'])==3
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: PNG/JPEG, checksum, preservation, derivatives, CSV, duplicate, invalid, header, restart')
+            print('RIZOMA smoke PASS: PNG/JPEG/TIFF, checksum, preservation, derivatives, CSV, duplicate, invalid, header, restart')
+
         finally:
             if proc.poll() is None:
                 proc.terminate()

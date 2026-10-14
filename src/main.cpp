@@ -22,6 +22,7 @@
 #include <openssl/rand.h>
 #include <png.h>
 #include <jpeglib.h>
+#include <tiffio.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -80,12 +82,49 @@ CREATE TABLE IF NOT EXISTS images(
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,image_id TEXT,event TEXT NOT NULL,at TEXT NOT NULL,detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
 )SQL");}
-static std::string detect_format(const std::string& bytes){if(bytes.size()>=8&&png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()),0,8)==0)return "png";if(bytes.size()>=3&& (unsigned char)bytes[0]==0xff&&(unsigned char)bytes[1]==0xd8&&(unsigned char)bytes[2]==0xff)return "jpeg";throw Failure("Only PNG and JPEG images are accepted");}
+static std::string detect_format(const std::string& bytes){
+ if(bytes.size()>=8&&png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()),0,8)==0)return "png";
+ if(bytes.size()>=3&& (unsigned char)bytes[0]==0xff&&(unsigned char)bytes[1]==0xd8&&(unsigned char)bytes[2]==0xff)return "jpeg";
+ if(bytes.size()>=4&&
+    (((unsigned char)bytes[0]==0x49&&(unsigned char)bytes[1]==0x49&&(unsigned char)bytes[2]==0x2a&&(unsigned char)bytes[3]==0x00)||
+     ((unsigned char)bytes[0]==0x4d&&(unsigned char)bytes[1]==0x4d&&(unsigned char)bytes[2]==0x00&&(unsigned char)bytes[3]==0x2a)))return "tiff";
+ throw Failure("Only PNG, JPEG, and TIFF images are accepted");
+}
 static Raster png_decode(const std::string& s){png_image p{};p.version=PNG_IMAGE_VERSION;if(!png_image_begin_read_from_memory(&p,s.data(),s.size()))throw Failure("Invalid PNG image");auto cleanup=[&]{png_image_free(&p);};if(p.width==0||p.height==0||std::uint64_t(p.width)*p.height>MAX_PIXELS){cleanup();throw Failure("Image exceeds 12 megapixels");}Raster r;r.w=int(p.width);r.h=int(p.height);p.format=PNG_FORMAT_RGBA;r.rgba.resize(PNG_IMAGE_SIZE(p));if(!png_image_finish_read(&p,nullptr,r.rgba.data(),0,nullptr)){cleanup();throw Failure("PNG could not be decoded");}cleanup();return r;}
 struct JpegError{jpeg_error_mgr pub;jmp_buf jump;char message[JMSG_LENGTH_MAX]{};};
 extern "C" void on_jpeg_error(j_common_ptr cinfo){auto* err=reinterpret_cast<JpegError*>(cinfo->err);(*cinfo->err->format_message)(cinfo,err->message);longjmp(err->jump,1);}
 static Raster jpeg_decode(const std::string& s){jpeg_decompress_struct ci{};JpegError er{};ci.err=jpeg_std_error(&er.pub);er.pub.error_exit=on_jpeg_error;Raster r;std::vector<unsigned char>row;if(setjmp(er.jump)){jpeg_destroy_decompress(&ci);throw Failure(std::string("Invalid JPEG: ")+er.message);}jpeg_create_decompress(&ci);jpeg_mem_src(&ci,reinterpret_cast<const unsigned char*>(s.data()),s.size());jpeg_read_header(&ci,TRUE);if(ci.image_width==0||ci.image_height==0||std::uint64_t(ci.image_width)*ci.image_height>MAX_PIXELS){jpeg_destroy_decompress(&ci);throw Failure("Image exceeds 12 megapixels");}ci.out_color_space=JCS_RGB;jpeg_start_decompress(&ci);r.w=int(ci.output_width);r.h=int(ci.output_height);r.rgba.resize(std::size_t(r.w)*r.h*4);row.resize(std::size_t(r.w)*3);while(ci.output_scanline<ci.output_height){JSAMPROW rp=row.data();jpeg_read_scanlines(&ci,&rp,1);auto off=std::size_t(ci.output_scanline-1)*r.w*4;for(int x=0;x<r.w;x++){r.rgba[off+4*x]=row[3*x];r.rgba[off+4*x+1]=row[3*x+1];r.rgba[off+4*x+2]=row[3*x+2];r.rgba[off+4*x+3]=255;}}jpeg_finish_decompress(&ci);jpeg_destroy_decompress(&ci);return r;}
-static Raster decode(const std::string& s,const std::string& fmt){return fmt=="png"?png_decode(s):jpeg_decode(s);}
+struct MemTiff{const unsigned char* data;tmsize_t size;tmsize_t pos;};
+static tmsize_t tiff_read(thandle_t h,void* buf,tmsize_t s){auto* m=reinterpret_cast<MemTiff*>(h);if(m->pos>=m->size)return 0;tmsize_t avail=std::min(s,m->size-m->pos);std::memcpy(buf,m->data+m->pos,avail);m->pos+=avail;return avail;}
+static tmsize_t tiff_write(thandle_t,void*,tmsize_t){return 0;}
+static toff_t tiff_seek(thandle_t h,toff_t off,int whence){
+ auto* m=reinterpret_cast<MemTiff*>(h);
+ int64_t cur=static_cast<int64_t>(m->pos), len=static_cast<int64_t>(m->size), delta=static_cast<int64_t>(off);
+ int64_t next=0;
+ switch(whence){case SEEK_SET:next=delta;break;case SEEK_CUR:next=cur+delta;break;case SEEK_END:next=len+delta;break;default:return static_cast<toff_t>(-1);}
+ if(next<0||next>len)return static_cast<toff_t>(-1);
+ m->pos=static_cast<tmsize_t>(next);
+ return static_cast<toff_t>(next);
+}
+static int tiff_close(thandle_t){return 0;}
+static toff_t tiff_size(thandle_t h){auto* m=reinterpret_cast<MemTiff*>(h);return m->size;}
+static Raster tiff_decode(const std::string& s){
+ MemTiff mem{reinterpret_cast<const unsigned char*>(s.data()),static_cast<tmsize_t>(s.size()),0};
+ TIFF* tif=TIFFClientOpen("mem","r",&mem,tiff_read,tiff_write,tiff_seek,tiff_close,tiff_size,nullptr,nullptr);
+ if(!tif)throw Failure("Invalid TIFF image");
+ uint32_t w=0,h=0;TIFFGetField(tif,TIFFTAG_IMAGEWIDTH,&w);TIFFGetField(tif,TIFFTAG_IMAGELENGTH,&h);
+ if(w==0||h==0||std::uint64_t(w)*h>MAX_PIXELS){TIFFClose(tif);throw Failure("Image exceeds 12 megapixels");}
+ std::vector<uint32_t> buf(std::size_t(w)*h);
+ if(!TIFFReadRGBAImageOriented(tif,w,h,buf.data(),ORIENTATION_TOPLEFT,0)){TIFFClose(tif);throw Failure("TIFF could not be decoded");}
+ TIFFClose(tif);Raster r;r.w=int(w);r.h=int(h);r.rgba.resize(std::size_t(w)*h*4);
+ for(std::size_t i=0;i<buf.size();++i){uint32_t p=buf[i];r.rgba[i*4+0]=static_cast<unsigned char>(TIFFGetR(p));r.rgba[i*4+1]=static_cast<unsigned char>(TIFFGetG(p));r.rgba[i*4+2]=static_cast<unsigned char>(TIFFGetB(p));r.rgba[i*4+3]=static_cast<unsigned char>(TIFFGetA(p));}
+ return r;
+}
+static Raster decode(const std::string& s,const std::string& fmt){
+ if(fmt=="png")return png_decode(s);
+ if(fmt=="jpeg")return jpeg_decode(s);
+ return tiff_decode(s);
+}
 static std::string png_encode(const Raster& r){png_image im{};im.version=PNG_IMAGE_VERSION;im.width=r.w;im.height=r.h;im.format=PNG_FORMAT_RGBA;png_alloc_size_t n=0;if(!png_image_write_to_memory(&im,nullptr,&n,0,r.rgba.data(),0,nullptr))throw Failure("Preview encoding failed");std::string data(std::size_t(n),'\0');if(!png_image_write_to_memory(&im,data.data(),&n,0,r.rgba.data(),0,nullptr))throw Failure("Preview encoding failed");data.resize(std::size_t(n));return data;}
 static Raster preview(const Raster& orig,bool gray,double& mean){double ratio=std::min(1.,double(THUMB_MAX)/std::max(orig.w,orig.h));Raster out;out.w=std::max(1,int(std::lround(orig.w*ratio)));out.h=std::max(1,int(std::lround(orig.h*ratio)));out.rgba.resize(std::size_t(out.w)*out.h*4);double total=0;for(int y=0;y<out.h;y++){int sy=std::min(orig.h-1,int(double(y)*orig.h/out.h));for(int x=0;x<out.w;x++){int sx=std::min(orig.w-1,int(double(x)*orig.w/out.w));auto i=(std::size_t(sy)*orig.w+sx)*4,j=(std::size_t(y)*out.w+x)*4;const unsigned char* c=&orig.rgba[i];unsigned char lum=static_cast<unsigned char>(std::clamp(std::lround(.2126*c[0]+.7152*c[1]+.0722*c[2]),0L,255L));total+=lum;if(gray){out.rgba[j]=out.rgba[j+1]=out.rgba[j+2]=lum;}else{out.rgba[j]=c[0];out.rgba[j+1]=c[1];out.rgba[j+2]=c[2];}out.rgba[j+3]=255;}}mean=total/(out.w*out.h);return out;}
 static std::string safe_filename(std::string s){auto pos=s.find_last_of("/\\");if(pos!=std::string::npos)s=s.substr(pos+1);std::string n;for(unsigned char c:s){if(c>=32&&c!=127&&c!='"'&&c!='<'&&c!='>'&&c!='\\')n+=char(c);}if(n.empty())n="imagem-sem-nome";if(n.size()>100)n.resize(100);return n;}
@@ -101,8 +140,20 @@ static std::string all_images(const App& app){Db d(app.root/"rizoma.sqlite3");au
 static std::string one_image(const App& app,const std::string& id){Db d(app.root/"rizoma.sqlite3");auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=?";Stmt st(d.p,stm.c_str());st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");return "{\"data\":"+row_json(st.p)+"}";}
 static std::string csv_cell(const std::string& s){std::string x=s;if(!x.empty()&&(x[0]=='='||x[0]=='+'||x[0]=='-'||x[0]=='@'))x="'"+x;std::string out="\"";for(char c:x){if(c=='"')out+="\"\"";else if(c!='\r'&&c!='\n')out+=c;}return out+"\"";}
 static std::string manifest(const App& app){Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline FROM images ORDER BY created_at DESC");std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,scientific_status\r\n";while(sqlite3_step(st.p)==SQLITE_ROW){for(int i=0;i<12;++i){if(i)r+=",";r+=csv_cell(col(st.p,i));}r+=",\"NOT_ANALYZED\"\r\n";}return r;}
-static std::string media(const App& app,const std::string& id,const std::string& kind){Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path FROM images WHERE id=?");st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");int i=kind=="original"?0:kind=="preview"?1:2;fs::path stored=col(st.p,i); // paths are generated by this service, never from clients
-return slurp(app.root/stored);}
+static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime){
+ Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format FROM images WHERE id=?");
+ st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
+ int i=kind=="original"?0:kind=="preview"?1:2;
+ fs::path stored=col(st.p,i); // paths are generated by this service, never from clients
+ std::string fmt=col(st.p,3);
+ if(kind=="original"){
+  if(fmt=="png")mime="image/png";
+  else if(fmt=="jpeg")mime="image/jpeg";
+  else if(fmt=="tiff")mime="image/tiff";
+  else mime="application/octet-stream";
+ }else mime="image/png";
+ return slurp(app.root/stored);
+}
 struct Ingested{std::string id;std::string json;};
 static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured){
  if(bytes.empty()||bytes.size()>MAX_UPLOAD)throw Failure("Image must contain data and be at most 12 MiB");
@@ -111,7 +162,8 @@ static Ingested ingest(const App& app,const std::string& bytes,const std::string
  Db db(app.root/"rizoma.sqlite3");{Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=?");lookup.bind(1,hash);if(sqlite3_step(lookup.p)==SQLITE_ROW)throw Failure("An identical original is already registered (SHA-256 duplicate)");}
  double brightness=0,unused=0;auto thumb=preview(raster,false,brightness);auto gray=preview(raster,true,unused);
  auto thumbbytes=png_encode(thumb),graybytes=png_encode(gray);
- const std::string id=rand_id();const std::string orig=std::string("blobs/")+hash.substr(0,2)+"/"+hash+"."+(fmt=="png"?"png":"jpg");
+ const std::string id=rand_id();const std::string ext=fmt=="png"?"png":fmt=="jpeg"?"jpg":"tif";
+ const std::string orig=std::string("blobs/")+hash.substr(0,2)+"/"+hash+"."+ext;
  const std::string a="derived/"+id+"/preview.png",b="derived/"+id+"/grayscale.png";
  const fs::path stage=app.root/"staging"/(id+".tmp");put(stage,bytes);fs::create_directories((app.root/orig).parent_path());if(!fs::exists(app.root/orig))fs::rename(stage,app.root/orig);else fs::remove(stage);
  put(app.root/a,thumbbytes);put(app.root/b,graybytes);
@@ -142,7 +194,7 @@ static Response handle(const App& app,const http::request<http::string_body>& re
  if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
   std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id));auto kind=rem.substr(slash+1);if(kind=="original"||kind=="preview"||kind=="grayscale"){
-  std::string binary=media(app,id,kind);std::string mime="image/png";if(kind=="original"&&binary.size()>3&&(unsigned char)binary[0]==0xff)mime="image/jpeg";return respond(http::status::ok,v,std::move(binary),mime);
+  std::string mime;std::string binary=media(app,id,kind,mime);return respond(http::status::ok,v,std::move(binary),mime);
   }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
  }
  if(req.method()==http::verb::get){const std::map<std::string,std::pair<std::string,std::string>> assets={{"/",{"index.html","text/html; charset=utf-8"}},{"/index.html",{"index.html","text/html; charset=utf-8"}},{"/style.css",{"style.css","text/css; charset=utf-8"}},{"/app.js",{"app.js","application/javascript; charset=utf-8"}}};auto it=assets.find(p);if(it!=assets.end())try{return respond(http::status::ok,v,slurp(app.web/it->second.first),it->second.second);}catch(...){return problem(v,http::status::internal_server_error,"Frontend unavailable");}}
@@ -163,7 +215,9 @@ static void session(tcp::socket socket,App& app){
 }
 int main(int argc,char** argv){try{
  ::umask(0077);App app;app.root="./var";app.web="./web";
+ TIFFSetWarningHandler(nullptr);TIFFSetErrorHandler(nullptr);
  for(int i=1;i<argc;i++){std::string a=argv[i];if(a=="--data-dir"&&i+1<argc)app.root=argv[++i];else if(a=="--web-dir"&&i+1<argc)app.web=argv[++i];else if(a=="--port"&&i+1<argc){int port=std::stoi(argv[++i]);if(port<1024||port>65535)throw Failure("Port out of range");app.port=static_cast<unsigned short>(port);}else throw Failure("Usage: rizoma-server [--data-dir DIRECTORY] [--web-dir DIRECTORY] [--port 1024..65535]");}
  initialize(app);asio::io_context io;tcp::acceptor acceptor(io,{asio::ip::make_address("127.0.0.1"),app.port});std::cout<<"RIZOMA v0.2.0 — http://127.0.0.1:"<<app.port<<" (loopback only)\n"<<"Data dir: "<<fs::absolute(app.root)<<"\n"<<std::flush;
  for(;;){tcp::socket s(io);acceptor.accept(s);if(app.active.load()>=4){s.close();continue;}++app.active;std::thread(session,std::move(s),std::ref(app)).detach();}
  }catch(const std::exception& e){std::cerr<<"RIZOMA fatal: "<<e.what()<<"\n";return 1;}}
+
