@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+ <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+ <meta name="theme-color" content="#071e38">
+ <meta name="description" content="RIZOMA — plataforma de imagens científicas: recebimento, preservação e preparação para análises futuras.">
+ <title>RIZOMA · Acervo de imagens</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Ir para o conteúdo</a>
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+   <a class="brand" href="/" aria-label="RIZOMA, início">
+    <svg viewBox="0 0 52 52" aria-hidden="true" class="brand-logo"><g fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M26 5v14m0 0c-8 0-12-4-12-9m12 9c8 0 12-4 12-9M26 19v8m0 0-11 7m11-7 12 7m-23 0-6 11m6-11 3 12m20-12 6 11m-6-11-3 12M26 27v20"/></g><circle cx="26" cy="19" r="3" fill="currentColor"/></svg>
+    <span class="brand-words"><span>Ecossistema SisTer</span><strong>RIZOMA</strong></span>
+   </a>
+   <p class="sidebar-subtitle">Infraestrutura de imagens científicas</p>
+   <div class="navlabel">ESPAÇO DE TRABALHO</div>
+   <nav aria-label="Seções principais" id="navigation">
+    <button type="button" data-view="acervo" class="active" aria-current="page"><span class="navico">▦</span>Acervo de imagens</button>
+    <button type="button" data-view="recebimento"><span class="navico">⇧</span>Recebimento</button>
+    <button type="button" data-view="integridade"><span class="navico">◈</span>Integridade e origem</button>
+    <button type="button" data-view="sobre"><span class="navico">ⓘ</span>Sobre o RIZOMA</button>
+   </nav>
+   <div class="sidebar-bottom">
+    <div class="side-note"><small>PRINCÍPIO DE DESENVOLVIMENTO</small><strong>Sempre pronto.<br>Sempre incompleto.</strong><p>Um sistema que preserva o que observa e explicita o que ainda não sabe.</p></div>
+    <div class="connection"><span class="connection-dot"></span><span>Acesso local</span><span>v0.2.0</span></div>
+   </div>
+  </aside>
+  <div class="mobile-scrim" id="mobile-scrim"></div>
+  <div class="workspace">
+   <header class="topbar"><button type="button" class="menu" id="menu" aria-label="Abrir navegação" aria-controls="sidebar" aria-expanded="false">☰</button>
+    <div class="crumb"><span class="crumb-root">RIZOMA</span><span class="crumb-slash">/</span><strong id="page-name">Acervo de imagens</strong></div>
+    <div class="top-status"><span class="status-pulse"></span><span id="service-state">Verificando serviço</span></div>
+   </header>
+   <main id="main" tabindex="-1">
+    <section class="view" id="view-acervo" aria-labelledby="acervo-title">
+      <div class="hero"><div class="hero-copy"><span class="eyebrow">OBSERVAR · PRESERVAR · PREPARAR</span><h1 id="acervo-title">A imagem é o <em>ponto de partida.</em></h1><p>Um lugar confiável para reunir imagens, preservar originais e preparar cada registro para análises futuras.</p><button class="button white" id="hero-upload" type="button">+ Receber imagens <span aria-hidden="true">↗</span></button></div><svg class="hero-network" viewBox="0 0 260 224" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><path d="M130 12 235 72v80l-105 60L25 152V72zM130 12v200M25 72l210 80M235 72 25 152" opacity=".45"/><path d="M130 45v80m0 0-43 30m43-30 40 30m-83 0-14 35m14-35 17 35m66-35 18 35m-18-35-16 35" stroke-width="3.5"/></g><g fill="currentColor"><circle cx="130" cy="125" r="6"/><circle cx="87" cy="155" r="4"/><circle cx="170" cy="155" r="4"/><circle cx="130" cy="45" r="4"/></g></svg></div>
+      <div class="statgrid"><article class="stat"><span>Imagens preservadas</span><strong id="stat-total">—</strong><small>Originais em armazenamento privado</small></article><article class="stat"><span>Pré-processadas</span><strong id="stat-prepared">—</strong><small>Visualizações geradas</small></article><article class="stat"><span>Revisão de qualidade</span><strong id="stat-review">—</strong><small>Inspeção visual recomendada</small></article><article class="stat"><span>Análise científica</span><strong>Não iniciada</strong><small>Etapa futura, ainda não validada</small></article></div>
+      <section class="panel"><div class="section-heading"><div><span class="section-kicker">ACERVO</span><h2>Imagens registradas</h2><p>Pesquise, inspecione e consulte os registros de origem.</p></div><button id="refresh" class="button outline" type="button">↻ Atualizar</button></div>
+       <div class="toolbar"><label class="searchwrap"><span class="sr-only">Pesquisar imagens</span><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Buscar por amostra, nome ou SHA-256"></label><label class="filterlabel">Qualidade<select id="filter"><option value="all">Todas as imagens</option><option value="REVIEW">Revisão normal</option><option value="LOW_LIGHT">Baixa luminosidade</option><option value="HIGH_LIGHT">Alta luminosidade</option></select></label></div>
+       <div id="gallery" class="gallery" aria-live="polite"></div>
+      </section>
+    </section>
+    <section class="view hidden" id="view-recebimento" aria-labelledby="receive-title">
+      <div class="pageintro"><div><span class="section-kicker">ENTRADA DE DADOS</span><h1 id="receive-title">Recebimento de imagens</h1><p>Os originais são preservados. A preparação gera arquivos derivados com proveniência identificável.</p></div><span class="version-pill">INGESTÃO v0.2.0</span></div>
+      <div class="receivelayout"><form id="upload-form" class="panel uploadpanel"><div class="section-heading"><div><h2>Enviar arquivos</h2><p>Selecione imagens PNG ou JPEG para o acervo local.</p></div></div>
+        <label class="dropzone" id="dropzone" for="file-input"><span class="uploadsymbol" aria-hidden="true">⇧</span><strong>Arraste imagens para esta área</strong><span>ou clique para selecionar arquivos</span><small>PNG e JPEG · até 12 MiB por arquivo · até 12 megapixels</small></label><input class="visually-hidden-file" id="file-input" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" multiple>
+        <div class="formgrid"><label>Identificador da amostra <small>Opcional · letras, números, _ e -</small><input type="text" id="sample-id" maxlength="64" placeholder="Ex.: P01-T2-2026"></label><label>Data de captura <small>Opcional · registrada pelo operador</small><input id="capture-date" type="date"></label></div>
+        <div class="selected"><strong id="file-count">Nenhum arquivo selecionado</strong><ul id="file-list"></ul></div>
+        <button class="button primary full" id="send" type="submit" disabled>Registrar imagens <span aria-hidden="true">→</span></button>
+        <div class="upload-results" id="upload-results" role="status" aria-live="polite"></div>
+       </form>
+       <aside class="process-panel"><div class="process-kicker">O QUE ACONTECE DEPOIS DO ENVIO?</div><div class="process-step"><span>01</span><div><strong>Verificação do arquivo</strong><p>Formato real, dimensões e limite de processamento.</p></div></div><div class="process-step"><span>02</span><div><strong>Preservação do original</strong><p>Identificação criptográfica SHA-256, sem substituição silenciosa.</p></div></div><div class="process-step"><span>03</span><div><strong>Preparação visual</strong><p>Miniatura e versão em tons de cinza, separadas do original.</p></div></div><div class="process-step"><span>04</span><div><strong>Registro rastreável</strong><p>Metadados persistidos com a versão do procedimento.</p></div></div><div class="process-foot">Nenhuma métrica radicular é estimada nesta versão.</div></aside>
+      </div>
+    </section>
+    <section class="view hidden" id="view-integridade" aria-labelledby="integrity-title"><div class="pageintro"><div><span class="section-kicker">RASTREABILIDADE</span><h1 id="integrity-title">Integridade e origem</h1><p>Cada arquivo original tem identidade criptográfica e metadados próprios. Derivados não substituem a fonte.</p></div></div><div class="info-grid"><article class="panel fact"><span class="fact-icon">#</span><h2>SHA-256</h2><p>A identidade do arquivo é calculada sobre seus bytes originais. Arquivos idênticos não são cadastrados duas vezes neste piloto.</p></article><article class="panel fact"><span class="fact-icon">⊞</span><h2>SQLite WAL</h2><p>Os registros ficam em uma base persistente, separada dos arquivos de imagem privados.</p></article><article class="panel fact"><span class="fact-icon">◉</span><h2>Derivados separados</h2><p>Pré-visualizações não alteram o original. O processamento registra versão e estado de qualidade operacional.</p></article></div><div class="panel downloadpanel"><div><h2>Manifesto do acervo</h2><p>Exporte os metadados das imagens para conferência e organização externa. Não contém medições radiculares.</p></div><a href="/api/v1/export/manifest.csv" class="button primary" download="rizoma-manifesto.csv">↓ Exportar CSV</a></div><div class="notice"><strong>Limite desta versão</strong><p>A preservação por SHA-256 não substitui backups, controle de acesso, guarda institucional nem validação do método de análise. A conferência do hash compara conteúdo; não prova, isoladamente, autoria ou cadeia de custódia.</p></div></section>
+    <section class="view hidden" id="view-sobre" aria-labelledby="about-title"><div class="pageintro"><div><span class="section-kicker">SOBRE O SISTEMA</span><h1 id="about-title">Uma infraestrutura que nasce da imagem</h1><p>RIZOMA v0.2.0 é um primeiro corte operacional para aquisição, preservação e preparação visual de arquivos.</p></div></div><div class="panel aboutpanel"><div class="about-label">ESTADO ATUAL</div><h2>Sempre pronto. Sempre incompleto.</h2><p>Pronto para receber e consultar imagens locais em um ambiente controlado. Incompleto por decisão: controles multiusuário, autenticação, publicação segura, processamento em lote e métricas de raízes ainda serão construídos e validados.</p><p style="margin-top:1rem;font-size:0.875rem;color:var(--text-muted, #7c9e8e)">Distribuído sob licença <strong>GNU General Public License v3.0 (GPLv3)</strong>.</p><div class="phases"><div class="phase now"><span>01</span><strong>Receber e preservar</strong><small>Operacional no piloto</small></div><div class="phase now"><span>02</span><strong>Preparar e inspecionar</strong><small>Operacional no piloto</small></div><div class="phase"><span>03</span><strong>Segmentar e medir</strong><small>Futuro, depende de protocolos e validação</small></div><div class="phase"><span>04</span><strong>Comparar ao longo do tempo</strong><small>Futuro, depende de aquisição padronizada</small></div></div></div></section>
+   </main>
+   <footer class="footer"><span>RIZOMA · Ecossistema SisTer · GPL v3.0</span><span>Sempre pronto. Sempre incompleto.</span></footer>
+  </div>
+</div>
+<div id="inspector" class="modal-backdrop hidden" role="presentation"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="inspect-title"><div class="modal-head"><div><span class="section-kicker">INSPEÇÃO VISUAL</span><h2 id="inspect-title">Imagem</h2></div><button class="close" id="close-inspect" type="button" aria-label="Fechar inspeção">×</button></div><div class="modal-tools"><div class="segmented"><button type="button" data-image-mode="original" class="active">Original</button><button type="button" data-image-mode="preview">Prévia</button><button type="button" data-image-mode="grayscale">Tons de cinza</button></div><label class="zoom">Zoom <input type="range" id="zoom" min="100" max="300" step="25" value="100"><span id="zoomvalue">100%</span></label></div><div class="image-stage"><img id="inspect-image" alt="Imagem selecionada para inspeção visual"></div><div id="inspect-metadata" class="metadata"></div><div class="modal-foot">As prévias são recursos visuais, não evidência de segmentação ou classificação científica.</div></section></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js" defer></script>
+</body></html>

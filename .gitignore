@@ -1,0 +1,7 @@
+build/
+var/
+*.sqlite3*
+*.tmp
+__pycache__/
+*.py[cod]
+.DS_Store
