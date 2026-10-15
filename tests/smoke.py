@@ -191,6 +191,7 @@ def main():
             status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis','POST',b'',auth_headers)
             assert status==201,(status,body)
             analysis=json.loads(body)['data']
+            first_run_id=analysis['id']
             assert analysis['source_sha256']==hashlib.sha256(candidate).hexdigest()
             assert analysis['algorithm_version']=='0.1.0-experimental'
             assert analysis['regions'] and analysis['regions'][0]['suggestion'] in ('ROOT','UNKNOWN'),analysis
@@ -223,6 +224,14 @@ def main():
             except sqlite3.IntegrityError:
                 pass
             db.close()
+            # A later execution remains separate and the earlier run stays addressable.
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis','POST',b'',auth_headers)
+            assert status==201 and json.loads(body)['data']['id']!=first_run_id,(status,body)
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis-runs',headers=auth_headers)
+            runs=json.loads(body)['data']
+            assert status==200 and len(runs)==2 and any(run['id']==first_run_id for run in runs),(status,body)
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={first_run_id}',headers=auth_headers)
+            assert status==200 and json.loads(body)['data']['regions'][0]['version']==3,(status,body)
 
             # 7. Multi-user isolation verification (User 2)
             email2 = 'pesquisador2@embrapa.br'
@@ -305,7 +314,7 @@ def main():
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
             assert len(json.loads(body)['data'])==4
-            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis',headers=restarted_headers1)
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={first_run_id}',headers=restarted_headers1)
             recovered=json.loads(body)['data']
             assert status==200 and recovered['regions'][0]['review']['label']=='UNKNOWN' and recovered['regions'][0]['review']['action']=='SUSPEND',(status,body)
             status,body,_=req(review_url,headers=restarted_headers1)

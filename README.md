@@ -88,6 +88,7 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza do usuário autenticado |
 | `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
 | `POST/GET` | `/api/v1/images/{id}/analysis` | Executa ou recupera o baseline experimental e suas regiões |
+| `GET` | `/api/v1/images/{id}/analysis-runs` | Lista execuções preservadas da imagem |
 | `POST/GET` | `/api/v1/analysis-regions/{id}/reviews` | Registra ou recupera o histórico humano da região |
 
 Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo autenticado:

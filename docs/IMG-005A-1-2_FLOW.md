@@ -4,7 +4,9 @@
 
 Uma imagem pertencente ao usuário autenticado pode iniciar uma execução do baseline experimental. O original é decodificado, seu SHA-256 é copiado para `analysis_runs`, regiões candidatas são registradas em coordenadas nativas e cada região recebe uma hipótese automática independente (`ROOT` quando os dois critérios concordam; `UNKNOWN` quando há apenas um critério).
 
-O frontend existente apresenta as regiões sobre a imagem. O pesquisador pode confirmar, corrigir ou suspender o julgamento usando `ROOT`, `MATRIX`, `ARTIFACT` ou `UNKNOWN`. Cada ação cria um novo `review_events`; nenhuma hipótese ou revisão anterior é atualizada ou apagada. `analysis_regions.current_version` é apenas o cursor concorrente para comparação e acesso ao último evento.
+O frontend existente apresenta as regiões sobre a imagem como **“Possível raiz — não confirmada”** ou “Estrutura desconhecida — revisão necessária”. Concordância algorítmica é evidência técnica, nunca confiança científica calibrada. O pesquisador pode confirmar, corrigir ou suspender o julgamento usando `ROOT`, `MATRIX`, `ARTIFACT` ou `UNKNOWN`. Cada ação cria um novo `review_events`; nenhuma hipótese ou revisão anterior é atualizada ou apagada. `analysis_regions.current_version` é apenas o cursor concorrente para comparação e acesso ao último evento.
+
+O inspetor permite alternar original e negativo sem trocar o sistema de coordenadas dos overlays. Um seletor de execuções permite recuperar análises anteriores, mesmo depois de nova execução ou reinício.
 
 ## Baseline experimental
 
@@ -33,6 +35,7 @@ Toda consulta e gravação é autorizada pelo caminho `região → execução �
 ```text
 POST /api/v1/images/{image_id}/analysis
 GET  /api/v1/images/{image_id}/analysis
+GET  /api/v1/images/{image_id}/analysis-runs
 POST /api/v1/analysis-regions/{region_id}/reviews
 GET  /api/v1/analysis-regions/{region_id}/reviews
 ```

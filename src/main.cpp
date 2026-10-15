@@ -337,12 +337,15 @@ constexpr const char* ANALYSIS_ALGORITHM="rizoma-exp-002-003-integrated-baseline
 constexpr const char* ANALYSIS_VERSION="0.1.0-experimental";
 constexpr const char* ANALYSIS_PARAMS="{\"global_sigma\":1.2,\"local_sigma\":1.45,\"cell\":32,\"min_area\":4,\"min_aspect\":1.7,\"execution\":\"in_memory_current_ingest_domain\"}";
 
-static std::string analysis_json(const App& app,const std::string& image_id,const std::string& user_id){
+static std::string analysis_json(const App& app,const std::string& image_id,const std::string& user_id,const std::string& requested_run=""){
  Db db(app.root/"rizoma.sqlite3");
  Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=?");owned.bind(1,image_id);owned.bind(2,user_id);
  if(sqlite3_step(owned.p)!=SQLITE_ROW)throw Failure("Image not found");
- Stmt run(db.p,"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at FROM analysis_runs WHERE image_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1");
- run.bind(1,image_id);if(sqlite3_step(run.p)!=SQLITE_ROW)return "{\"data\":null}";
+ const std::string query=requested_run.empty()
+  ?"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at FROM analysis_runs WHERE image_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1"
+  :"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at FROM analysis_runs WHERE image_id=? AND id=?";
+ Stmt run(db.p,query.c_str());run.bind(1,image_id);if(!requested_run.empty())run.bind(2,requested_run);
+ if(sqlite3_step(run.p)!=SQLITE_ROW)return "{\"data\":null}";
  const std::string run_id=col(run.p,0);std::ostringstream out;
  out<<"{\"data\":{\"id\":"<<q(run_id)<<",\"algorithm\":"<<q(col(run.p,1))<<",\"algorithm_version\":"<<q(col(run.p,2))
     <<",\"parameters\":"<<col(run.p,3)<<",\"source_sha256\":"<<q(col(run.p,4))<<",\"status\":"<<q(col(run.p,5))
@@ -364,6 +367,15 @@ static std::string analysis_json(const App& app,const std::string& image_id,cons
   out<<'}';
  }
  out<<"]}}";return out.str();
+}
+
+static std::string analysis_runs_json(const App& app,const std::string& image_id,const std::string& user_id){
+ Db db(app.root/"rizoma.sqlite3");Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=?");owned.bind(1,image_id);owned.bind(2,user_id);
+ if(sqlite3_step(owned.p)!=SQLITE_ROW)throw Failure("Image not found");
+ Stmt runs(db.p,R"SQL(SELECT a.id,a.algorithm_version,a.status,a.created_at,a.completed_at,COUNT(r.id)
+ FROM analysis_runs a LEFT JOIN analysis_regions r ON r.run_id=a.id WHERE a.image_id=?
+ GROUP BY a.id ORDER BY a.created_at DESC,a.rowid DESC)SQL");runs.bind(1,image_id);
+ std::string out="{\"data\":[";bool first=true;while(sqlite3_step(runs.p)==SQLITE_ROW){if(!first)out+=',';first=false;out+="{\"id\":"+q(col(runs.p,0))+",\"algorithm_version\":"+q(col(runs.p,1))+",\"status\":"+q(col(runs.p,2))+",\"created_at\":"+q(col(runs.p,3))+",\"completed_at\":"+q(col(runs.p,4))+",\"region_count\":"+std::to_string(sqlite3_column_int64(runs.p,5))+"}";}return out+"]}";
 }
 
 static std::string start_analysis(const App& app,const std::string& image_id,const std::string& user_id){
@@ -612,7 +624,7 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   }
   if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
    std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id));if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
+   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
    std::string mime;std::string binary=media(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(binary),mime);
    }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
   }

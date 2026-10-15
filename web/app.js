@@ -18,7 +18,7 @@
 const $ = id => document.getElementById(id);
 const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = new Intl.NumberFormat('pt-BR');
-let images = [], selectedFiles = [], current = null, mode = 'original', currentUser = null, currentAnalysis = null, selectedRegion = null;
+let images = [], selectedFiles = [], current = null, mode = 'original', currentUser = null, currentAnalysis = null, analysisRuns = [], selectedRegion = null;
 const viewNames = {acervo:'Acervo de imagens',recebimento:'Recebimento',integridade:'Integridade e origem',sobre:'Sobre o RIZOMA'};
 
 function toast(message){
@@ -266,9 +266,13 @@ async function openInspect(id){
   $('zoom').value = '100';
   fillInspect();
   currentAnalysis = null;
+  analysisRuns = [];
   selectedRegion = null;
   renderAnalysis();
-  try{ const result = await api(`/api/v1/images/${current.id}/analysis`); currentAnalysis = result.data; renderAnalysis(); fillInspect(); if(currentAnalysis) $('start-analysis').textContent='Executar nova análise'; }catch(err){ toast(err.message); }
+  try{
+    const runs = await api(`/api/v1/images/${current.id}/analysis-runs`); analysisRuns = runs.data || [];
+    const result = await api(`/api/v1/images/${current.id}/analysis`); currentAnalysis = result.data; renderAnalysis(); fillInspect(); if(currentAnalysis) $('start-analysis').textContent='Executar nova análise';
+  }catch(err){ toast(err.message); }
   $('close-inspect').focus();
 }
 
@@ -276,11 +280,12 @@ function fillInspect(){
   if(!current) return;
   for(const b of document.querySelectorAll('[data-image-mode]'))
     b.classList.toggle('active', b.dataset.imageMode === mode);
-  const src = mode === 'original'
+  const src = (mode === 'original' || mode === 'negative')
     ? `/api/v1/images/${current.id}/original-view`
     : `/api/v1/images/${current.id}/${mode}`;
   const img = $('inspect-image');
   img.src = src;
+  img.style.filter = mode === 'negative' ? 'invert(1)' : '';
   applyZoom();
   $('inspect-metadata').innerHTML = [
     ['Identificador', current.id],
@@ -298,6 +303,14 @@ function fillInspect(){
 }
 
 function regionById(id){ return currentAnalysis?.regions?.find(r => r.id === id); }
+function automaticLabel(label){ return label === 'ROOT' ? 'Possível raiz — não confirmada' : 'Estrutura desconhecida — revisão necessária'; }
+
+async function loadAnalysisRun(runId){
+  try{
+    const result=await api(`/api/v1/images/${current.id}/analysis?run_id=${encodeURIComponent(runId)}`);
+    currentAnalysis=result.data;selectedRegion=null;renderAnalysis();fillInspect();
+  }catch(err){toast(err.message);}
+}
 
 function selectRegion(id){
   selectedRegion = regionById(id);
@@ -313,20 +326,22 @@ function renderAnalysis(){
     return;
   }
   const regions = currentAnalysis.regions || [];
-  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${100*r.x/current.width}%;top:${100*r.y/current.height}%;width:${100*r.width/current.width}%;height:${100*r.height/current.height}%" title="Região ${r.ordinal}: ${r.suggestion}"></button>`).join('');
+  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${100*r.x/current.width}%;top:${100*r.y/current.height}%;width:${100*r.width/current.width}%;height:${100*r.height/current.height}%" title="Região ${r.ordinal}: ${h(automaticLabel(r.suggestion))}"></button>`).join('');
   for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
   const selected = selectedRegion && regionById(selectedRegion.id);
   panel.innerHTML = `<div class="analysis-head"><div><span class="section-kicker">ANÁLISE EXPERIMENTAL</span><strong>${h(currentAnalysis.algorithm_version)}</strong></div><span class="analysis-count">${number.format(regions.length)} regiões</span></div>
+    <label class="run-picker">Execução preservada<select id="analysis-run-picker">${analysisRuns.map((run,index) => `<option value="${h(run.id)}" ${run.id===currentAnalysis.id?'selected':''}>${index+1}. ${h(run.created_at)} · ${number.format(run.region_count)} regiões</option>`).join('')}</select></label>
     <p class="analysis-warning">Sugestões não validadas biologicamente. Coordenadas referem-se ao original SHA-256 <code>${h(currentAnalysis.source_sha256.slice(0,12))}…</code></p>
-    <div class="region-list">${regions.length ? regions.map(r => `<button type="button" data-region-row="${h(r.id)}" class="region-row ${selected?.id === r.id ? 'selected' : ''}"><span>R${r.ordinal}</span><div><strong>${h(r.review?.label || r.suggestion)}</strong><small>${r.review ? 'Revisão humana v'+r.version : 'Sugestão automática'} · ${number.format(r.area)} px candidatos</small></div></button>`).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
+    <div class="region-list">${regions.length ? regions.map(r => `<button type="button" data-region-row="${h(r.id)}" class="region-row ${selected?.id === r.id ? 'selected' : ''}"><span>R${r.ordinal}</span><div><strong>${h(r.review?.label || automaticLabel(r.suggestion))}</strong><small>${r.review ? 'Decisão humana v'+r.version : 'Sugestão automática, não confirmada'} · ${number.format(r.area)} px candidatos</small></div></button>`).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
     ${selected ? reviewEditor(selected) : '<p class="choose-region">Selecione uma região na imagem ou na lista para revisar.</p>'}`;
   for(const row of panel.querySelectorAll('[data-region-row]')) row.onclick = () => selectRegion(row.dataset.regionRow);
+  if($('analysis-run-picker')) $('analysis-run-picker').onchange = e => loadAnalysisRun(e.target.value);
   if($('review-form')) $('review-form').onsubmit = saveReview;
 }
 
 function reviewEditor(region){
   const label = region.review?.label || region.suggestion;
-  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)}</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar sugestão</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
+  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3><p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion))}</strong>. Concordância é evidência técnica, não confiança científica.</p><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
 }
 
 async function loadHistory(regionId){
@@ -342,7 +357,7 @@ async function startAnalysis(){
   const button = $('start-analysis'); button.disabled = true; button.textContent = 'Analisando…';
   try{
     const result = await api(`/api/v1/images/${current.id}/analysis`, {method:'POST'});
-    currentAnalysis = result.data; selectedRegion = currentAnalysis.regions?.[0] || null; renderAnalysis();
+    currentAnalysis = result.data; const runs=await api(`/api/v1/images/${current.id}/analysis-runs`);analysisRuns=runs.data||[];selectedRegion = currentAnalysis.regions?.[0] || null; renderAnalysis();
     if(selectedRegion) loadHistory(selectedRegion.id);
     fillInspect(); toast(`${currentAnalysis.regions.length} região(ões) candidata(s) registrada(s).`);
   }catch(err){ toast(err.message); }
@@ -368,6 +383,7 @@ function closeInspect(){
   }
   current = null;
   currentAnalysis = null;
+  analysisRuns = [];
   selectedRegion = null;
 }
 
