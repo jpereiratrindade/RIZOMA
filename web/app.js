@@ -366,11 +366,23 @@ async function startAnalysis(){
 
 async function saveReview(event){
   event.preventDefault(); if(!selectedRegion) return;
+  const targetRegionId = selectedRegion.id;
+  const activeRunId = currentAnalysis?.id;
   const action=$('review-action').value;
   const label=action==='SUSPEND'?'UNKNOWN':$('review-label').value;
   try{
-    await api(`/api/v1/analysis-regions/${selectedRegion.id}/reviews`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,label,justification:$('review-justification').value.trim(),expected_version:selectedRegion.version})});
-    const result=await api(`/api/v1/images/${current.id}/analysis`);currentAnalysis=result.data;selectedRegion=regionById(selectedRegion.id);renderAnalysis();loadHistory(selectedRegion.id);toast('Revisão salva no histórico.');
+    await api(`/api/v1/analysis-regions/${targetRegionId}/reviews`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action,label,justification:$('review-justification').value.trim(),expected_version:selectedRegion.version})
+    });
+    const url = `/api/v1/images/${current.id}/analysis` + (activeRunId ? `?run_id=${encodeURIComponent(activeRunId)}` : '');
+    const result = await api(url);
+    currentAnalysis = result.data;
+    selectedRegion = regionById(targetRegionId);
+    renderAnalysis();
+    if(selectedRegion) loadHistory(selectedRegion.id);
+    toast('Revisão salva no histórico.');
   }catch(err){
     toast(err.message === 'Review conflict' ? 'Conflito: a região foi revisada em outra sessão. Recarregue a análise.' : err.message);
   }
@@ -484,3 +496,7 @@ $('btn-logout').addEventListener('click', logout);
 const initial = location.hash.slice(1);
 nav(viewNames[initial] ? initial : 'acervo');
 refresh();
+
+// Previne o zoom acidental da pagina inteira pelo navegador via Ctrl + Roda do mouse
+window.addEventListener('wheel', e => { if(e.ctrlKey) e.preventDefault(); }, { passive: false });
+
