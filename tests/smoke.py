@@ -68,17 +68,57 @@ def main():
             else: raise AssertionError('Server did not start')
             status,body,_=req(base+'/')
             assert status==200 and b'RIZOMA' in body
+
+            # 1. Access without authentication must be rejected
+            status,body,_=req(base+'/api/v1/auth/me')
+            assert status==200 and json.loads(body)['authenticated'] is False
+            status,body,_=req(base+'/api/v1/images')
+            assert status==401,(status,body)
+
+            # 2. Registration / Code request: only @embrapa.br allowed
+            status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':'invasor@gmail.com'}).encode(),{'Content-Type':'application/json'})
+            assert status==400 and b'@embrapa.br' in body,(status,body)
+            status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':'alvo@embrapa.com'}).encode(),{'Content-Type':'application/json'})
+            assert status==400,(status,body)
+
+            # 3. Valid institutional email generates OTP code
+            email = 'pesquisador.campo@embrapa.br'
+            status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':email}).encode(),{'Content-Type':'application/json'})
+            assert status==200,(status,body)
+            resp_obj = json.loads(body)
+            otp_code = resp_obj.get('dev_code')
+            assert otp_code and len(otp_code)==6 and otp_code.isdigit(),(status,body)
+
+            # 4. Invalid OTP rejected
+            status,body,_=req(base+'/api/v1/auth/verify-code','POST',json.dumps({'email':email,'code':'999999'}).encode(),{'Content-Type':'application/json'})
+            assert status==401,(status,body)
+
+            # 5. Correct OTP establishes session
+            status,body,hdrs=req(base+'/api/v1/auth/verify-code','POST',json.dumps({'email':email,'code':otp_code}).encode(),{'Content-Type':'application/json'})
+            assert status==200,(status,body)
+            auth_info = json.loads(body)
+            token = auth_info['session_token']
+            assert len(token)==64
+            assert auth_info['user']['email']==email
+
+            # 6. Verify authenticated session
+            auth_headers = {'Cookie': f'rizoma_session={token}'}
+            status,body,_=req(base+'/api/v1/auth/me',headers=auth_headers)
+            assert status==200 and json.loads(body)['authenticated'] is True
+            assert json.loads(body)['user']['email']==email
+
             data=png()
             upload=base+'/api/v1/images?filename=campo.png&sample_id=P01-T2&capture_date=2026-10-14'
-            headers={'Content-Type':'application/octet-stream','X-Rizoma-Client':'web-v0.2.0'}
+            headers={'Content-Type':'application/octet-stream','X-Rizoma-Client':'web-v0.2.0',**auth_headers}
             status,body,_=req(upload,'POST',data,headers)
             assert status==201,(status,body)
             obj=json.loads(body)['data']
             assert obj['width']==32 and obj['height']==20 and obj['sha256']==hashlib.sha256(data).hexdigest(),obj
             assert obj['scientific_status']=='NOT_ANALYZED'
+            assert obj['user_email']==email,obj
             uid=obj['id']
             for kind,magic in [('original',b'\x89PNG'),('preview',b'\x89PNG'),('grayscale',b'\x89PNG')]:
-                status,payload,_=req(base+'/api/v1/images/'+uid+'/'+kind)
+                status,payload,_=req(base+'/api/v1/images/'+uid+'/'+kind,headers=auth_headers)
                 assert status==200 and payload.startswith(magic),(kind,status)
             # A real, minimal 8x6 JPEG fixture, independent from imaging Python packages.
             jpeg = base64.b64decode(
@@ -87,7 +127,7 @@ def main():
             status,body,_=req(base+'/api/v1/images?filename=teste.jpg','POST',jpeg,headers)
             assert status==201,(status,body)
             item=json.loads(body)['data']
-            assert item['format']=='jpeg' and item['width']==8 and item['height']==6
+            assert item['format']=='jpeg' and item['width']==8 and item['height']==6 and item['user_email']==email
             # A real, minimal 8x6 RGB TIFF fixture, independent from imaging Python packages.
             tiff = base64.b64decode(
                 'SUkqAAgAAAAKAAABBAABAAAACAAAAAEBBAABAAAABgAAAAIBAwADAAAAhgAAAAMBAwABAAAAAQAAAAYB'
@@ -99,43 +139,62 @@ def main():
             status,body,_=req(base+'/api/v1/images?filename=scanner_raiz.tif&sample_id=P01-RAIZ','POST',tiff,headers)
             assert status==201,(status,body)
             item_tif=json.loads(body)['data']
-            assert item_tif['format']=='tiff' and item_tif['width']==8 and item_tif['height']==6
-            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original')
+            assert item_tif['format']=='tiff' and item_tif['width']==8 and item_tif['height']==6 and item_tif['user_email']==email
+            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original',headers=auth_headers)
             assert status==200 and payload.startswith(b'II*\x00'),status
             assert resp_hdrs.get('Content-Type')=='image/tiff'
-            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original-view')
+            status,payload,resp_hdrs=req(base+'/api/v1/images/'+item_tif['id']+'/original-view',headers=auth_headers)
             assert status==200 and payload.startswith(b'\x89PNG'),status
             assert resp_hdrs.get('Content-Type')=='image/png'
-            status,payload,_=req(base+'/api/v1/images/'+item_tif['id']+'/preview')
+            status,payload,_=req(base+'/api/v1/images/'+item_tif['id']+'/preview',headers=auth_headers)
             assert status==200 and payload.startswith(b'\x89PNG'),status
-            status,body,_=req(base+'/api/v1/images')
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers)
             assert status==200 and len(json.loads(body)['data'])==3
-            status,body,_=req(base+'/api/v1/export/manifest.csv')
+            status,body,_=req(base+'/api/v1/export/manifest.csv',headers=auth_headers)
             assert status==200 and b'P01-T2' in body and b'P01-RAIZ' in body and b'NOT_ANALYZED' in body
+            assert email.encode() in body
             status,body,_=req(upload,'POST',data,headers)
             assert status==409,(status,body)
             status,body,_=req(upload,'POST',b'<script>not an image</script>',headers)
             assert status==415,(status,body)
-            status,body,_=req(upload,'POST',data,{'Content-Type':'application/octet-stream'})
+            status,body,_=req(upload,'POST',data,{'Content-Type':'application/octet-stream',**auth_headers})
             assert status==403,(status,body)
             status,body,_=req(upload,'POST',data,{**headers,'Origin':'http://malicious-attacker.com'})
             assert status==403,(status,body)
             status,body,_=req(upload,'POST',data,{**headers,'Origin':f'http://127.0.0.1:{port}'})
             assert status==409,(status,body)
-            status,body,_=req(base+'/api/v1/images/../../etc/passwd')
+            status,body,_=req(base+'/api/v1/images/../../etc/passwd',headers=auth_headers)
             assert status in (400,404),(status,body)
+
+            # 7. Test Logout and subsequent rejection
+            status,body,_=req(base+'/api/v1/auth/logout','POST',headers=auth_headers)
+            assert status==200
+            status,body,_=req(base+'/api/v1/auth/me',headers=auth_headers)
+            assert status==200 and json.loads(body)['authenticated'] is False
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers)
+            assert status==401
+
+            # 8. Re-authenticate for persistence across restart
+            status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':email}).encode(),{'Content-Type':'application/json'})
+            assert status==200
+            new_code = json.loads(body)['dev_code']
+            status,body,_=req(base+'/api/v1/auth/verify-code','POST',json.dumps({'email':email,'code':new_code}).encode(),{'Content-Type':'application/json'})
+            assert status==200
+            new_token = json.loads(body)['session_token']
+            restarted_headers = {'Cookie': f'rizoma_session={new_token}'}
+
             # Persistence after an actual restart
             proc.terminate(); proc.wait(timeout=6)
             proc=subprocess.Popen([exe,'--host','127.0.0.1','--data-dir',temp,'--web-dir',web,'--port',str(port)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             for _ in range(80):
                 try:
-                    status,body,_=req(base+'/api/v1/images')
+                    status,body,_=req(base+'/api/v1/images',headers=restarted_headers)
                     if status==200: break
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
             assert len(json.loads(body)['data'])==3
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: PNG/JPEG/TIFF, checksum, preservation, derivatives, CSV, duplicate, origin/CSRF, invalid, header, restart')
+            print('RIZOMA smoke PASS: @embrapa.br auth, OTP generation/validation, session persistence, PNG/JPEG/TIFF, checksum, CSV, restart')
 
         finally:
             if proc.poll() is None:

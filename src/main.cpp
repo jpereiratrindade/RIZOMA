@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <setjmp.h>
 #include <sstream>
 #include <stdexcept>
@@ -60,28 +61,128 @@ constexpr const char* PIPELINE="rizoma-inspection-0.2.0";
 struct Failure : std::runtime_error {using std::runtime_error::runtime_error;};
 struct Raster {int w=0,h=0;std::vector<unsigned char> rgba;};
 struct App {fs::path root,web; std::string host="127.0.0.1"; unsigned short port=8089; std::atomic<int>active{0};};
-static std::string utc(){auto t=std::time(nullptr); std::tm v{};gmtime_r(&t,&v);char buf[32];std::strftime(buf,sizeof(buf),"%Y-%m-%dT%H:%M:%SZ",&v);return buf;}
+static std::string utc_offset(int seconds){auto t=std::time(nullptr)+seconds; std::tm v{};gmtime_r(&t,&v);char buf[32];std::strftime(buf,sizeof(buf),"%Y-%m-%dT%H:%M:%SZ",&v);return buf;}
+[[maybe_unused]] static std::string utc(){return utc_offset(0);}
 static std::string esc(std::string_view s){std::string out;out.reserve(s.size()+8);for(unsigned char c:s){switch(c){case '"':out+="\\\"";break;case '\\':out+="\\\\";break;case '\n':out+="\\n";break;case '\r':out+="\\r";break;case '\t':out+="\\t";break;default:if(c<32){char b[7];std::snprintf(b,sizeof(b),"\\u%04x",c);out+=b;}else out+=char(c);}}return out;}
 static std::string q(std::string_view s){return "\""+esc(s)+"\"";}
 static std::string hex(const unsigned char* ptr,std::size_t n){static const char h[]="0123456789abcdef";std::string out;out.reserve(n*2);for(std::size_t i=0;i<n;++i){out+=h[ptr[i]>>4];out+=h[ptr[i]&15];}return out;}
 static std::string hash256(const std::string& data){unsigned char dig[EVP_MAX_MD_SIZE];unsigned int len=0;if(EVP_Digest(data.data(),data.size(),dig,&len,EVP_sha256(),nullptr)!=1)throw Failure("SHA-256 unavailable");return hex(dig,len);}
 static std::string rand_id(){unsigned char b[12];if(RAND_bytes(b,sizeof(b))!=1)throw Failure("random generator unavailable");return hex(b,sizeof(b));}
+static std::string rand_otp(){unsigned int val=0;if(RAND_bytes(reinterpret_cast<unsigned char*>(&val),sizeof(val))!=1)throw Failure("random generator unavailable");val%=1000000;char buf[8];std::snprintf(buf,sizeof(buf),"%06u",val);return buf;}
+static std::string rand_session_token(){unsigned char b[32];if(RAND_bytes(b,sizeof(b))!=1)throw Failure("random generator unavailable");return hex(b,sizeof(b));}
+static std::string normalize_email(std::string s){while(!s.empty()&&std::isspace(static_cast<unsigned char>(s.front())))s.erase(s.begin());while(!s.empty()&&std::isspace(static_cast<unsigned char>(s.back())))s.pop_back();for(char& c:s)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));return s;}
+static bool is_embrapa_email(const std::string& email){
+ const std::string suffix="@embrapa.br";
+ if(email.size()<=suffix.size())return false;
+ if(email.substr(email.size()-suffix.size())!=suffix)return false;
+ std::string local=email.substr(0,email.size()-suffix.size());
+ if(local.empty()||local.front()=='.'||local.back()=='.')return false;
+ for(std::size_t i=0;i<local.size();++i){
+  char c=local[i];
+  if(c=='.'&&i+1<local.size()&&local[i+1]=='.')return false;
+  if(!(std::isalnum(static_cast<unsigned char>(c))||c=='.'||c=='_'||c=='-'||c=='+'))return false;
+ }
+ return true;
+}
+static std::string name_from_email(const std::string& email){
+ auto at=email.find('@');std::string local=at==std::string::npos?email:email.substr(0,at);
+ std::string name;bool cap=true;
+ for(char c:local){if(c=='.'||c=='_'||c=='-'){name+=' ';cap=true;}else{name+=cap?static_cast<char>(std::toupper(static_cast<unsigned char>(c))):c;cap=false;}}
+ return name.empty()?email:name;
+}
+static std::string json_extract_string(const std::string& body,const std::string& key){
+ std::string pat="\""+key+"\"";auto pos=body.find(pat);if(pos==std::string::npos)return "";
+ auto colon=body.find(':',pos+pat.size());if(colon==std::string::npos)return "";
+ auto q1=body.find('"',colon+1);if(q1==std::string::npos)return "";
+ auto q2=body.find('"',q1+1);if(q2==std::string::npos)return "";
+ return body.substr(q1+1,q2-q1-1);
+}
+static bool send_email_code(const std::string& to_email,const std::string& code,std::string& err_out){
+ const char* smtp_host_env=std::getenv("RIZOMA_SMTP_HOST");
+ std::string smtp_host=smtp_host_env?smtp_host_env:"";
+ if(smtp_host.empty()){
+  std::cout<<"\n[RIZOMA AUTH] ========================================\n"
+           <<"[RIZOMA AUTH] Chave de acesso institucional gerada:\n"
+           <<"[RIZOMA AUTH] Destinatário : "<<to_email<<"\n"
+           <<"[RIZOMA AUTH] Código OTP   : "<<code<<" (válido por 15 min)\n"
+           <<"[RIZOMA AUTH] ========================================\n\n"<<std::flush;
+  return true;
+ }
+ const char* smtp_port_env=std::getenv("RIZOMA_SMTP_PORT");
+ std::string smtp_port=(smtp_port_env&&*smtp_port_env)?smtp_port_env:"587";
+ const char* smtp_user_env=std::getenv("RIZOMA_SMTP_USER");
+ const char* smtp_pass_env=std::getenv("RIZOMA_SMTP_PASS");
+ const char* smtp_from_env=std::getenv("RIZOMA_SMTP_FROM");
+ std::string smtp_from=(smtp_from_env&&*smtp_from_env)?smtp_from_env:"rizoma@embrapa.br";
+
+ std::ostringstream msg;
+ msg<<"From: \"RIZOMA SisTer\" <"<<smtp_from<<">\r\n"
+    <<"To: <"<<to_email<<">\r\n"
+    <<"Subject: RIZOMA - Chave de acesso: "<<code<<"\r\n"
+    <<"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+    <<"Olá!\r\n\r\n"
+    <<"Você solicitou acesso ao RIZOMA (Ecossistema SisTer - Embrapa).\r\n"
+    <<"Sua chave temporária de acesso é:\r\n\r\n"
+    <<"    "<<code<<"\r\n\r\n"
+    <<"Esta chave é de uso único e expira em 15 minutos.\r\n"
+    <<"Se você não solicitou este código, por favor ignore este e-mail.\r\n\r\n"
+    <<"--\r\nRIZOMA · Imagem primeiro · Embrapa\r\n";
+
+ std::ostringstream cmd;
+ cmd<<"curl --silent --show-error --url 'smtp://"<<smtp_host<<":"<<smtp_port<<"'";
+ cmd<<" --mail-from "<<q(smtp_from)<<" --mail-rcpt "<<q(to_email);
+ if(smtp_port=="587"||smtp_port=="25")cmd<<" --ssl-reqd";
+ if(smtp_user_env&&*smtp_user_env)cmd<<" --user "<<q(std::string(smtp_user_env)+":"+(smtp_pass_env?smtp_pass_env:""));
+
+ FILE* pipe=popen(cmd.str().c_str(),"w");
+ if(!pipe){err_out="Não foi possível iniciar envio de e-mail";return false;}
+ std::string email_data=msg.str();
+ fwrite(email_data.data(),1,email_data.size(),pipe);
+ int status=pclose(pipe);
+ if(status!=0){
+  err_out="Falha no envio via SMTP (código "+std::to_string(status)+")";
+  std::cerr<<"[RIZOMA SMTP ERROR] "<<err_out<<"\n";
+  return false;
+ }
+ return true;
+}
 static void put(const fs::path& p,const std::string& data){fs::create_directories(p.parent_path());std::ofstream f(p,std::ios::binary|std::ios::trunc);if(!f)throw Failure("could not create file");f.write(data.data(),std::streamsize(data.size()));f.flush();if(!f)throw Failure("could not write file");::chmod(p.c_str(),0600);}
 static std::string slurp(const fs::path& p){std::ifstream f(p,std::ios::binary);if(!f)throw Failure("could not read file");return {std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>()};}
 static void sql(sqlite3* db,const char* stmt){char* err=nullptr;if(sqlite3_exec(db,stmt,nullptr,nullptr,&err)!=SQLITE_OK){std::string m=err?err:"SQL failure";sqlite3_free(err);throw Failure(m);}}
 struct Db {sqlite3* p=nullptr; explicit Db(const fs::path& f){if(sqlite3_open_v2(f.c_str(),&p,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK)throw Failure("Cannot open database");sqlite3_busy_timeout(p,8000);}~Db(){if(p)sqlite3_close(p);}Db(const Db&)=delete;Db& operator=(const Db&)=delete;};
 struct Stmt{sqlite3_stmt* p=nullptr;Stmt(sqlite3* db,const char* s){if(sqlite3_prepare_v2(db,s,-1,&p,nullptr)!=SQLITE_OK)throw Failure(sqlite3_errmsg(db));}~Stmt(){sqlite3_finalize(p);}void bind(int i,const std::string& v){if(sqlite3_bind_text(p,i,v.data(),int(v.size()),SQLITE_TRANSIENT)!=SQLITE_OK)throw Failure("DB bind error");}std::string txt(int i)const{auto s=reinterpret_cast<const char*>(sqlite3_column_text(p,i));return s?s:"";}};
-static void initialize(const App& app){fs::create_directories(app.root/"blobs");fs::create_directories(app.root/"derived");fs::create_directories(app.root/"staging");::chmod(app.root.c_str(),0700);Db db(app.root/"rizoma.sqlite3");sql(db.p,"PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");sql(db.p,R"SQL(
+static void initialize(const App& app){
+ fs::create_directories(app.root/"blobs");fs::create_directories(app.root/"derived");fs::create_directories(app.root/"staging");::chmod(app.root.c_str(),0700);
+ Db db(app.root/"rizoma.sqlite3");sql(db.p,"PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
+ sql(db.p,R"SQL(
 CREATE TABLE IF NOT EXISTS images(
  id TEXT PRIMARY KEY, filename TEXT NOT NULL, sample_id TEXT NOT NULL, capture_date TEXT NOT NULL,
  created_at TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL,
  width INTEGER NOT NULL, height INTEGER NOT NULL, format TEXT NOT NULL,
  brightness REAL NOT NULL, qc_state TEXT NOT NULL, pipeline TEXT NOT NULL,
- original_path TEXT NOT NULL, preview_path TEXT NOT NULL, grayscale_path TEXT NOT NULL
+ original_path TEXT NOT NULL, preview_path TEXT NOT NULL, grayscale_path TEXT NOT NULL,
+ user_email TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,image_id TEXT,event TEXT NOT NULL,at TEXT NOT NULL,detail TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users(
+ id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+ created_at TEXT NOT NULL, last_login_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_codes(
+ id TEXT PRIMARY KEY, email TEXT NOT NULL, code TEXT NOT NULL, code_hash TEXT NOT NULL,
+ expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions(
+ token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL,
+ created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
-)SQL");}
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, expires_at);
+)SQL");
+ try { sql(db.p, "ALTER TABLE images ADD COLUMN user_email TEXT NOT NULL DEFAULT ''"); } catch(...) {}
+}
 static std::string detect_format(const std::string& bytes){
  if(bytes.size()>=8&&png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()),0,8)==0)return "png";
  if(bytes.size()>=3&& (unsigned char)bytes[0]==0xff&&(unsigned char)bytes[1]==0xd8&&(unsigned char)bytes[2]==0xff)return "jpeg";
@@ -134,12 +235,12 @@ static int nib(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c
 static std::string decode_uri(const std::string& s){std::string v;for(std::size_t i=0;i<s.size();++i){if(s[i]=='%'&&i+2<s.size()&&nib(s[i+1])>=0&&nib(s[i+2])>=0){v+=char((nib(s[i+1])<<4)|nib(s[i+2]));i+=2;}else if(s[i]=='+')v+=' ';else v+=s[i];}return v;}
 static std::map<std::string,std::string> params(const std::string& path){std::map<std::string,std::string> p;auto pos=path.find('?');if(pos==std::string::npos)return p;std::string tail=path.substr(pos+1);std::istringstream in(tail);std::string part;while(std::getline(in,part,'&')){auto eq=part.find('=');if(eq!=std::string::npos)p[decode_uri(part.substr(0,eq))]=decode_uri(part.substr(eq+1));}return p;}
 static std::string col(sqlite3_stmt* st,int i){auto p=reinterpret_cast<const char*>(sqlite3_column_text(st,i));return p?p:"";}
-static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int(st,7)<<",\"height\":"<<sqlite3_column_int(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
-constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline";
+static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int(st,7)<<",\"height\":"<<sqlite3_column_int(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"user_email\":"<<q(col(st,13))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
+constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,user_email";
 static std::string all_images(const App& app){Db d(app.root/"rizoma.sqlite3");auto stm=std::string("SELECT ")+fields+" FROM images ORDER BY created_at DESC, id DESC LIMIT 500";Stmt st(d.p,stm.c_str());std::string out="{\"schema\":\"rizoma.images.v0.2.0\",\"data\":[";bool first=true;while(sqlite3_step(st.p)==SQLITE_ROW){if(!first)out+=",";first=false;out+=row_json(st.p);}out+="]}";return out;}
 static std::string one_image(const App& app,const std::string& id){Db d(app.root/"rizoma.sqlite3");auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=?";Stmt st(d.p,stm.c_str());st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");return "{\"data\":"+row_json(st.p)+"}";}
 static std::string csv_cell(const std::string& s){std::string x=s;if(!x.empty()&&(x[0]=='='||x[0]=='+'||x[0]=='-'||x[0]=='@'))x="'"+x;std::string out="\"";for(char c:x){if(c=='"')out+="\"\"";else if(c!='\r'&&c!='\n')out+=c;}return out+"\"";}
-static std::string manifest(const App& app){Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline FROM images ORDER BY created_at DESC");std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,scientific_status\r\n";while(sqlite3_step(st.p)==SQLITE_ROW){for(int i=0;i<12;++i){if(i)r+=",";r+=csv_cell(col(st.p,i));}r+=",\"NOT_ANALYZED\"\r\n";}return r;}
+static std::string manifest(const App& app){Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email FROM images ORDER BY created_at DESC");std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email,scientific_status\r\n";while(sqlite3_step(st.p)==SQLITE_ROW){for(int i=0;i<13;++i){if(i)r+=",";r+=csv_cell(col(st.p,i));}r+=",\"NOT_ANALYZED\"\r\n";}return r;}
 static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime){
  Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format FROM images WHERE id=?");
  st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
@@ -170,7 +271,7 @@ static std::string media(const App& app,const std::string& id,const std::string&
  return slurp(app.root/stored);
 }
 struct Ingested{std::string id;std::string json;};
-static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured){
+static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured,const std::string& user_email){
  if(bytes.empty()||bytes.size()>MAX_UPLOAD)throw Failure("Image must contain data and be at most 12 MiB");
  if(!sample_ok(sample)||!date_ok(captured))throw Failure("Invalid sample identifier or capture date");
  auto fmt=detect_format(bytes);auto raster=decode(bytes,fmt);auto hash=hash256(bytes);
@@ -185,33 +286,183 @@ static Ingested ingest(const App& app,const std::string& bytes,const std::string
  if(fmt=="tiff")put(app.root/("derived/"+id+"/original_view.png"), png_encode(raster));
  const std::string state=brightness<35?"LOW_LIGHT":brightness>220?"HIGH_LIGHT":"REVIEW";
  sql(db.p,"BEGIN IMMEDIATE");try{
- Stmt st(db.p,"INSERT INTO images(id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,original_path,preview_path,grayscale_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
- st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc());st.bind(6,hash);sqlite3_bind_int64(st.p,7,sqlite3_int64(bytes.size()));sqlite3_bind_int(st.p,8,raster.w);sqlite3_bind_int(st.p,9,raster.h);st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);
+ Stmt st(db.p,"INSERT INTO images(id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,original_path,preview_path,grayscale_path,user_email) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+ st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc_offset(0));st.bind(6,hash);sqlite3_bind_int64(st.p,7,sqlite3_int64(bytes.size()));sqlite3_bind_int(st.p,8,raster.w);sqlite3_bind_int(st.p,9,raster.h);st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);st.bind(17,user_email);
  if(sqlite3_step(st.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
- Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED',?,?)");ev.bind(1,id);ev.bind(2,utc());ev.bind(3,hash);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+ Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED',?,?)");ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,hash+" | "+user_email);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
  return {id,one_image(app,id)};
 }
 using Response=http::response<http::string_body>;
 static Response respond(http::status s,unsigned version,std::string body,std::string mime="application/json; charset=utf-8"){
- Response r{s,version};r.set(http::field::server,"RIZOMA/0.2.0");r.set(http::field::content_type,mime);r.set(http::field::cache_control,"no-store");r.set("X-Content-Type-Options","nosniff");r.set("X-Frame-Options","DENY");r.set("Referrer-Policy","no-referrer");r.set("Content-Security-Policy","default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");r.keep_alive(false);r.body()=std::move(body);r.prepare_payload();return r;}
+ Response r{s,version};r.set(http::field::server,"RIZOMA/0.2.0");r.set(http::field::content_type,mime);r.set(http::field::cache_control,"no-store");r.set("X-Content-Type-Options","nosniff");r.set("X-Frame-Options","DENY");r.set("Referrer-Policy","no-referrer");r.set("Content-Security-Policy","default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");r.keep_alive(false);r.body()=std::move(body);r.prepare_payload();return r;}
 static Response problem(unsigned ver,http::status s,const std::string& msg){return respond(s,ver,"{\"error\":\""+esc(msg)+"\"}");}
 static bool valid_id(std::string s){return s.size()==24&&std::all_of(s.begin(),s.end(),[](char c){return(c>='a'&&c<='f')||(c>='0'&&c<='9');});}
-static Response handle(const App& app,const http::request<http::string_body>& req){unsigned v=req.version();std::string target(req.target());auto p=target.substr(0,target.find('?'));auto args=params(target);
- if(req.method()==http::verb::get&&p=="/api/v1/health")return respond(http::status::ok,v,"{\"status\":\"ok\",\"name\":\"RIZOMA\",\"version\":\"0.2.0\",\"scope\":\"local-image-intake\"}");
- if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app));
- if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app),"text/csv; charset=utf-8");
- if(req.method()==http::verb::post&&p=="/api/v1/images"){
-  if(req.find("X-Rizoma-Client")==req.end()||req["X-Rizoma-Client"]!="web-v0.2.0")return problem(v,http::status::forbidden,"Client header required");
-  if(req[http::field::content_type]!="application/octet-stream")return problem(v,http::status::unsupported_media_type,"Use application/octet-stream");
-  if(req.body().size()>MAX_UPLOAD)return problem(v,http::status::payload_too_large,"File exceeds upload limit");
-  try{auto ret=ingest(app,req.body(),args["filename"],args["sample_id"],args["capture_date"]);return respond(http::status::created,v,ret.json);}
-  catch(const Failure& e){std::string m=e.what();http::status st=m.find("already registered")!=std::string::npos?http::status::conflict:m.find("Only PNG")!=std::string::npos?http::status::unsupported_media_type:m.find("exceeds")!=std::string::npos?http::status::payload_too_large:http::status::unprocessable_entity;return problem(v,st,m);}
+
+static std::string extract_token(const http::request<http::string_body>& req){
+ if(auto it=req.find(http::field::authorization);it!=req.end()){
+  std::string val(it->value());
+  if(val.starts_with("Bearer "))return val.substr(7);
+  if(val.starts_with("bearer "))return val.substr(7);
  }
- if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
-  std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-  try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id));auto kind=rem.substr(slash+1);if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
-  std::string mime;std::string binary=media(app,id,kind,mime);return respond(http::status::ok,v,std::move(binary),mime);
-  }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
+ if(auto it=req.find("X-Rizoma-Token");it!=req.end()){
+  return std::string(it->value());
+ }
+ if(auto it=req.find(http::field::cookie);it!=req.end()){
+  std::string cookies(it->value());
+  std::string prefix="rizoma_session=";
+  auto pos=cookies.find(prefix);
+  if(pos!=std::string::npos){
+   auto start=pos+prefix.size();
+   auto end=cookies.find(';',start);
+   return cookies.substr(start,end==std::string::npos?std::string::npos:end-start);
+  }
+ }
+ return "";
+}
+struct UserInfo{std::string id;std::string email;std::string name;};
+static std::optional<UserInfo> authenticate(const App& app,const http::request<http::string_body>& req){
+ std::string token=extract_token(req);
+ if(token.empty())return std::nullopt;
+ Db d(app.root/"rizoma.sqlite3");
+ Stmt st(d.p,"SELECT u.id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token = ?");
+ st.bind(1,token);
+ if(sqlite3_step(st.p)!=SQLITE_ROW)return std::nullopt;
+ std::string exp=col(st.p,3);
+ if(exp<utc_offset(0))return std::nullopt;
+ return UserInfo{col(st.p,0),col(st.p,1),col(st.p,2)};
+}
+
+static Response handle(const App& app,const http::request<http::string_body>& req){
+ unsigned v=req.version();std::string target(req.target());auto p=target.substr(0,target.find('?'));auto args=params(target);
+ if(req.method()==http::verb::get&&p=="/api/v1/health")return respond(http::status::ok,v,"{\"status\":\"ok\",\"name\":\"RIZOMA\",\"version\":\"0.2.0\",\"scope\":\"local-image-intake\"}");
+
+ // Auth endpoints
+ if(req.method()==http::verb::get&&p=="/api/v1/auth/me"){
+  auto user=authenticate(app,req);
+  if(!user)return respond(http::status::ok,v,"{\"authenticated\":false}");
+  std::ostringstream o;
+  o<<"{\"authenticated\":true,\"user\":{\"id\":"<<q(user->id)<<",\"email\":"<<q(user->email)<<",\"name\":"<<q(user->name)<<"}}";
+  return respond(http::status::ok,v,o.str());
+ }
+ if(req.method()==http::verb::post&&p=="/api/v1/auth/request-code"){
+  std::string raw_email=json_extract_string(req.body(),"email");
+  std::string email=normalize_email(raw_email);
+  if(!is_embrapa_email(email)){
+   return problem(v,http::status::bad_request,"Apenas e-mails institucionais @embrapa.br são permitidos.");
+  }
+  std::string code=rand_otp();
+  std::string code_hash=hash256(code);
+  std::string exp=utc_offset(15*60);
+  std::string now=utc_offset(0);
+  std::string code_id=rand_id();
+  Db db(app.root/"rizoma.sqlite3");
+  Stmt st(db.p,"INSERT INTO auth_codes(id, email, code, code_hash, expires_at, used_at, created_at) VALUES(?,?,?,?,?,NULL,?)");
+  st.bind(1,code_id);st.bind(2,email);st.bind(3,code);st.bind(4,code_hash);st.bind(5,exp);st.bind(6,now);
+  if(sqlite3_step(st.p)!=SQLITE_DONE)return problem(v,http::status::internal_server_error,"Falha ao gerar código de acesso");
+  std::string err;
+  send_email_code(email,code,err);
+  const char* host_env=std::getenv("RIZOMA_SMTP_HOST");
+  bool is_dev=(host_env==nullptr||*host_env=='\0');
+  std::ostringstream resp;
+  resp<<"{\"status\":\"ok\",\"message\":\"Chave de acesso enviada para "<<esc(email)<<".\"";
+  if(is_dev)resp<<",\"dev_code\":"<<q(code);
+  resp<<"}";
+  return respond(http::status::ok,v,resp.str());
+ }
+ if(req.method()==http::verb::post&&p=="/api/v1/auth/verify-code"){
+  std::string email=normalize_email(json_extract_string(req.body(),"email"));
+  std::string code=json_extract_string(req.body(),"code");
+  code.erase(std::remove_if(code.begin(),code.end(),::isspace),code.end());
+  if(!is_embrapa_email(email)){
+   return problem(v,http::status::bad_request,"Apenas e-mails institucionais @embrapa.br são permitidos.");
+  }
+  if(code.empty()||code.size()>16){
+   return problem(v,http::status::bad_request,"Código de verificação inválido.");
+  }
+  Db db(app.root/"rizoma.sqlite3");
+  Stmt st(db.p,"SELECT id, expires_at FROM auth_codes WHERE email=? AND code=? AND used_at IS NULL ORDER BY created_at DESC LIMIT 1");
+  st.bind(1,email);st.bind(2,code);
+  if(sqlite3_step(st.p)!=SQLITE_ROW){
+   return problem(v,http::status::unauthorized,"Chave de acesso inválida ou já utilizada.");
+  }
+  std::string code_id=col(st.p,0);
+  std::string exp=col(st.p,1);
+  std::string now=utc_offset(0);
+  if(exp<now){
+   return problem(v,http::status::unauthorized,"Chave de acesso expirada. Solicite uma nova chave.");
+  }
+  Stmt mark(db.p,"UPDATE auth_codes SET used_at=? WHERE id=?");
+  mark.bind(1,now);mark.bind(2,code_id);
+  sqlite3_step(mark.p);
+
+  std::string user_id;
+  std::string user_name;
+  Stmt ufind(db.p,"SELECT id, name FROM users WHERE email=?");
+  ufind.bind(1,email);
+  if(sqlite3_step(ufind.p)==SQLITE_ROW){
+   user_id=col(ufind.p,0);
+   user_name=col(ufind.p,1);
+   Stmt uupd(db.p,"UPDATE users SET last_login_at=? WHERE id=?");
+   uupd.bind(1,now);uupd.bind(2,user_id);
+   sqlite3_step(uupd.p);
+  }else{
+   user_id=rand_id();
+   user_name=name_from_email(email);
+   Stmt uins(db.p,"INSERT INTO users(id, email, name, created_at, last_login_at) VALUES(?,?,?,?,?)");
+   uins.bind(1,user_id);uins.bind(2,email);uins.bind(3,user_name);uins.bind(4,now);uins.bind(5,now);
+   sqlite3_step(uins.p);
+  }
+  std::string session_token=rand_session_token();
+  std::string session_exp=utc_offset(7*24*3600);
+  Stmt sins(db.p,"INSERT INTO sessions(token, user_id, email, created_at, expires_at) VALUES(?,?,?,?,?)");
+  sins.bind(1,session_token);sins.bind(2,user_id);sins.bind(3,email);sins.bind(4,now);sins.bind(5,session_exp);
+  sqlite3_step(sins.p);
+
+  Stmt ev(db.p,"INSERT INTO events(image_id, event, at, detail) VALUES(NULL, 'USER_LOGIN', ?, ?)");
+  ev.bind(1,now);ev.bind(2,email);
+  sqlite3_step(ev.p);
+
+  std::ostringstream resp;
+  resp<<"{\"status\":\"ok\",\"session_token\":"<<q(session_token)
+      <<",\"user\":{\"id\":"<<q(user_id)<<",\"email\":"<<q(email)<<",\"name\":"<<q(user_name)<<"}}";
+  auto r=respond(http::status::ok,v,resp.str());
+  r.set(http::field::set_cookie,"rizoma_session="+session_token+"; Path=/; HttpOnly; SameSite=Lax");
+  return r;
+ }
+ if(req.method()==http::verb::post&&p=="/api/v1/auth/logout"){
+  std::string token=extract_token(req);
+  if(!token.empty()){
+   Db db(app.root/"rizoma.sqlite3");
+   Stmt st(db.p,"DELETE FROM sessions WHERE token=?");
+   st.bind(1,token);
+   sqlite3_step(st.p);
+  }
+  auto r=respond(http::status::ok,v,"{\"status\":\"ok\"}");
+  r.set(http::field::set_cookie,"rizoma_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax");
+  return r;
+ }
+
+ // Protected routes
+ if(p=="/api/v1/images"||p=="/api/v1/export/manifest.csv"||p.starts_with("/api/v1/images/")){
+  auto user=authenticate(app,req);
+  if(!user){
+   return problem(v,http::status::unauthorized,"Autenticação necessária. Acesse com seu e-mail institucional @embrapa.br.");
+  }
+  if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app));
+  if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app),"text/csv; charset=utf-8");
+  if(req.method()==http::verb::post&&p=="/api/v1/images"){
+   if(req.find("X-Rizoma-Client")==req.end()||req["X-Rizoma-Client"]!="web-v0.2.0")return problem(v,http::status::forbidden,"Client header required");
+   if(req[http::field::content_type]!="application/octet-stream")return problem(v,http::status::unsupported_media_type,"Use application/octet-stream");
+   if(req.body().size()>MAX_UPLOAD)return problem(v,http::status::payload_too_large,"File exceeds upload limit");
+   try{auto ret=ingest(app,req.body(),args["filename"],args["sample_id"],args["capture_date"],user->email);return respond(http::status::created,v,ret.json);}
+   catch(const Failure& e){std::string m=e.what();http::status st=m.find("already registered")!=std::string::npos?http::status::conflict:m.find("Only PNG")!=std::string::npos?http::status::unsupported_media_type:m.find("exceeds")!=std::string::npos?http::status::payload_too_large:http::status::unprocessable_entity;return problem(v,st,m);}
+  }
+  if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
+   std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
+   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id));auto kind=rem.substr(slash+1);if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
+   std::string mime;std::string binary=media(app,id,kind,mime);return respond(http::status::ok,v,std::move(binary),mime);
+   }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
+  }
  }
 
  if(req.method()==http::verb::get){const std::map<std::string,std::pair<std::string,std::string>> assets={{"/",{"index.html","text/html; charset=utf-8"}},{"/index.html",{"index.html","text/html; charset=utf-8"}},{"/style.css",{"style.css","text/css; charset=utf-8"}},{"/app.js",{"app.js","application/javascript; charset=utf-8"}}};auto it=assets.find(p);if(it!=assets.end())try{return respond(http::status::ok,v,slurp(app.web/it->second.first),it->second.second);}catch(...){return problem(v,http::status::internal_server_error,"Frontend unavailable");}}

@@ -31,6 +31,14 @@
   <div class="workspace">
    <header class="topbar"><button type="button" class="menu" id="menu" aria-label="Abrir navegação" aria-controls="sidebar" aria-expanded="false">☰</button>
     <div class="crumb"><span class="crumb-root">RIZOMA</span><span class="crumb-slash">/</span><strong id="page-name">Acervo de imagens</strong></div>
+    <div class="user-chip hidden" id="user-chip">
+      <span class="user-avatar" id="user-avatar" aria-hidden="true">EM</span>
+      <div class="user-meta">
+        <span class="user-email" id="user-email" title="">usuario@embrapa.br</span>
+        <span class="user-role">Embrapa</span>
+      </div>
+      <button type="button" class="btn-logout" id="btn-logout" title="Sair da sessão">Sair ⎋</button>
+    </div>
     <div class="top-status"><span class="status-pulse"></span><span id="service-state">Verificando serviço</span></div>
    </header>
    <main id="main" tabindex="-1">
@@ -45,6 +53,7 @@
     <section class="view hidden" id="view-recebimento" aria-labelledby="receive-title">
       <div class="pageintro"><div><span class="section-kicker">ENTRADA DE DADOS</span><h1 id="receive-title">Recebimento de imagens</h1><p>Os originais são preservados. A preparação gera arquivos derivados com proveniência identificável.</p></div><span class="version-pill">INGESTÃO v0.2.0</span></div>
       <div class="receivelayout"><form id="upload-form" class="panel uploadpanel"><div class="section-heading"><div><h2>Enviar arquivos</h2><p>Selecione imagens PNG, JPEG ou TIFF para o acervo local.</p></div></div>
+        <div class="operator-badge" id="operator-badge"><span class="op-label">Operador responsável:</span> <strong id="operator-email">Carregando...</strong> <small>· Vinculado ao registro de proveniência</small></div>
         <label class="dropzone" id="dropzone" for="file-input"><span class="uploadsymbol" aria-hidden="true">⇧</span><strong>Arraste imagens para esta área</strong><span>ou clique para selecionar arquivos</span><small>PNG, JPEG e TIFF · até 12 MiB por arquivo · até 12 megapixels</small></label><input class="visually-hidden-file" id="file-input" type="file" accept="image/png,image/jpeg,image/tiff,.png,.jpg,.jpeg,.tif,.tiff" multiple>
         <div class="formgrid"><label>Identificador da amostra <small>Opcional · letras, números, _ e -</small><input type="text" id="sample-id" maxlength="64" placeholder="Ex.: P01-T2-2026"></label><label>Data de captura <small>Opcional · registrada pelo operador</small><input id="capture-date" type="date"></label></div>
         <div class="selected"><strong id="file-count">Nenhum arquivo selecionado</strong><ul id="file-list"></ul></div>
@@ -59,6 +68,78 @@
    </main>
    <footer class="footer"><span>RIZOMA · Ecossistema SisTer · GPL v3.0</span><span>Sempre pronto. Sempre incompleto.</span></footer>
   </div>
+</div>
+<div id="auth-overlay" class="modal-backdrop auth-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+ <section class="modal auth-card">
+  <div class="auth-header">
+   <div class="auth-brand-row">
+    <svg viewBox="0 0 52 52" aria-hidden="true" class="brand-logo"><g fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M26 5v14m0 0c-8 0-12-4-12-9m12 9c8 0 12-4 12-9M26 19v8m0 0-11 7m11-7 12 7m-23 0-6 11m6-11 3 12m20-12 6 11m-6-11-3 12M26 27v20"/></g><circle cx="26" cy="19" r="3" fill="currentColor"/></svg>
+    <div class="auth-brand-text">
+     <span class="auth-kicker">ECOSSISTEMA SISTER · EMBRAPA</span>
+     <strong class="auth-brand-name">RIZOMA</strong>
+    </div>
+   </div>
+   <span class="auth-badge">ACESSO RESTRITO</span>
+   <h1 id="auth-title" class="auth-title">Registro &amp; Acesso Institucional</h1>
+   <p class="auth-desc">Identifique-se com seu e-mail institucional Embrapa para receber sua chave temporária de acesso ao acervo e à ingestão de imagens.</p>
+   <div class="auth-domain-tag">Somente e-mails <strong>@embrapa.br</strong> são permitidos</div>
+  </div>
+
+  <div class="auth-body">
+   <!-- Etapa 1: Inserir E-mail -->
+   <form id="auth-email-form" class="auth-form" novalidate>
+    <label class="auth-label" for="auth-email-input">
+     <span>E-mail institucional (@embrapa.br)</span>
+     <div class="auth-input-wrap">
+      <span class="auth-icon" aria-hidden="true">✉</span>
+      <input type="email" id="auth-email-input" placeholder="nome.sobrenome@embrapa.br" required autocomplete="email" autofocus>
+     </div>
+     <small class="auth-hint">Uma chave de acesso de 6 dígitos será enviada para o endereço informado.</small>
+    </label>
+    <button type="submit" class="button primary full auth-submit" id="btn-request-code">
+     Solicitar chave por e-mail <span aria-hidden="true">→</span>
+    </button>
+   </form>
+
+   <!-- Etapa 2: Validar Código de 6 dígitos -->
+   <form id="auth-code-form" class="auth-form hidden" novalidate>
+    <div class="auth-sent-banner">
+     <span>Chave enviada para:</span>
+     <strong id="auth-target-email">usuario@embrapa.br</strong>
+    </div>
+    <label class="auth-label" for="auth-code-input">
+     <span>Chave temporária de acesso</span>
+     <div class="auth-input-wrap">
+      <span class="auth-icon" aria-hidden="true">⚿</span>
+      <input type="text" id="auth-code-input" maxlength="6" inputmode="numeric" pattern="[0-9]{6}" placeholder="000000" class="code-box" autocomplete="one-time-code">
+     </div>
+     <small class="auth-hint">Código numérico de 6 dígitos recebido por e-mail (válido por 15 minutos).</small>
+    </label>
+
+    <div id="auth-dev-preview" class="auth-dev-preview hidden">
+     <div class="dev-banner-head"><span class="dev-tag">MODO LOCAL (PILOTO)</span><span>Console do servidor</span></div>
+     <p>Chave gerada no servidor: <strong id="auth-dev-code-val"></strong></p>
+    </div>
+
+    <button type="submit" class="button primary full auth-submit" id="btn-verify-code">
+     Confirmar chave e entrar <span aria-hidden="true">✓</span>
+    </button>
+
+    <div class="auth-links">
+     <button type="button" class="link-btn" id="btn-resend-code">↻ Reenviar nova chave</button>
+     <span class="link-sep" aria-hidden="true">·</span>
+     <button type="button" class="link-btn" id="btn-switch-email">Trocar e-mail</button>
+    </div>
+   </form>
+
+   <div id="auth-feedback" class="auth-feedback hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <div class="auth-foot">
+   <span>Controle de acesso do laboratório</span>
+   <span>RIZOMA v0.2.0 · GPL v3.0</span>
+  </div>
+ </section>
 </div>
 <div id="inspector" class="modal-backdrop hidden" role="presentation"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="inspect-title"><div class="modal-head"><div><span class="section-kicker">INSPEÇÃO VISUAL</span><h2 id="inspect-title">Imagem</h2></div><button class="close" id="close-inspect" type="button" aria-label="Fechar inspeção">×</button></div><div class="modal-tools"><div class="segmented"><button type="button" data-image-mode="original" class="active">Original</button><button type="button" data-image-mode="preview">Prévia</button><button type="button" data-image-mode="grayscale">Tons de cinza</button></div><label class="zoom">Zoom <input type="range" id="zoom" min="100" max="300" step="25" value="100"><span id="zoomvalue">100%</span></label></div><div class="image-stage"><img id="inspect-image" alt="Imagem selecionada para inspeção visual"></div><div id="inspect-metadata" class="metadata"></div><div class="modal-foot">As prévias são recursos visuais, não evidência de segmentação ou classificação científica.</div></section></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>

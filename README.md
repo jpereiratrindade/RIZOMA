@@ -52,23 +52,55 @@ A interface não envia arquivos a serviços externos. Por padrão seguro, o serv
 
 Para preparar a área privada de produção, crie diretório de armazenamento em disco confiável e mantenha `var/` fora do Git. O código, os testes e a interface são versionados; imagens reais, banco de dados e derivados não devem entrar no repositório público.
 
+## Autenticação e Registro Institucional (@embrapa.br)
+
+O RIZOMA implementa autenticação institucional baseada em **chave temporária de acesso (OTP de uso único)** enviada por e-mail:
+- **Restrição estrita de domínio:** aceita exclusivamente endereços institucionais `@embrapa.br`. Tentativas com qualquer outro domínio são rejeitadas.
+- **Registro simplificado:** na primeira solicitação válida, o perfil de usuário é provisionado automaticamente no banco SQLite local.
+- **Chave de 6 dígitos:** gerada de forma criptograficamente segura via OpenSSL, com validade de 15 minutos e consumo único.
+- **Sessão persistente:** após validação da chave, é emitida sessão (token de 64 caracteres) com validade de 7 dias persistida no banco, enviada via cookie `rizoma_session` ou cabeçalho `Authorization: Bearer <token>`.
+- **Rastreabilidade de operador:** toda imagem ingerida passa a ser associada ao e-mail institucional do operador no acervo e no log de eventos.
+
+### Configuração de Envio de E-mail (SMTP)
+
+Variáveis de ambiente opcionais para disparo de e-mail corporativo:
+- `RIZOMA_SMTP_HOST`: Host do servidor SMTP (ex.: `smtp.embrapa.br`). Se não informado, o servidor opera em modo piloto/desenvolvimento local, exibindo a chave no terminal e na interface de teste.
+- `RIZOMA_SMTP_PORT`: Porta SMTP (padrão: `587`).
+- `RIZOMA_SMTP_USER` / `RIZOMA_SMTP_PASS`: Credenciais opcionais de autenticação SMTP.
+- `RIZOMA_SMTP_FROM`: Remetente das mensagens (padrão: `rizoma@embrapa.br`).
+
 ## API do primeiro corte
 
 | Método | Rota | Função |
 |---|---|---|
 | `GET` | `/api/v1/health` | Saúde do serviço |
-| `GET` | `/api/v1/images` | Catálogo local, até 500 registros na primeira versão |
-| `POST` | `/api/v1/images?...` | Upload do binário, `application/octet-stream`, cabeçalho `X-Rizoma-Client: web-v0.2.0` |
-| `GET` | `/api/v1/images/{id}` | Metadados da imagem |
-| `GET` | `/api/v1/images/{id}/original` | Arquivo original preservado |
-| `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção |
-| `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza |
-| `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados |
+| `POST` | `/api/v1/auth/request-code` | Solicita chave de acesso para e-mail `@embrapa.br` |
+| `POST` | `/api/v1/auth/verify-code` | Valida código de 6 dígitos e inicia sessão |
+| `GET` | `/api/v1/auth/me` | Consulta dados da sessão atual |
+| `POST` | `/api/v1/auth/logout` | Encerra a sessão ativa |
+| `GET` | `/api/v1/images` | Catálogo local (requer autenticação) |
+| `POST` | `/api/v1/images?...` | Upload de imagem com registro do operador (requer autenticação) |
+| `GET` | `/api/v1/images/{id}` | Metadados da imagem (requer autenticação) |
+| `GET` | `/api/v1/images/{id}/original` | Arquivo original preservado (requer autenticação) |
+| `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção (requer autenticação) |
+| `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza (requer autenticação) |
+| `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados com operador (requer autenticação) |
 
-Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo:
+Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo autenticado:
 
 ```bash
-curl -fsS -X POST 'http://127.0.0.1:8089/api/v1/images?filename=amostra.png&sample_id=PARCELA-01&capture_date=2026-10-14' \
+# 1. Solicitar chave:
+curl -fsS -X POST 'http://127.0.0.1:8089/api/v1/auth/request-code' \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"pesquisador@embrapa.br"}'
+
+# 2. Validar chave (código recebido no e-mail ou console local):
+curl -fsS -c cookies.txt -X POST 'http://127.0.0.1:8089/api/v1/auth/verify-code' \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"pesquisador@embrapa.br","code":"123456"}'
+
+# 3. Enviar imagem usando a sessão autenticada:
+curl -fsS -b cookies.txt -X POST 'http://127.0.0.1:8089/api/v1/images?filename=amostra.png&sample_id=PARCELA-01&capture_date=2026-10-14' \
   -H 'Content-Type: application/octet-stream' -H 'X-Rizoma-Client: web-v0.2.0' \
   --data-binary @amostra.png
 ```
