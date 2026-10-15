@@ -23,6 +23,7 @@
 #include <png.h>
 #include <jpeglib.h>
 #include <tiffio.h>
+#include "database.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -148,45 +149,12 @@ static bool send_email_code(const std::string& to_email,const std::string& code,
 }
 static void put(const fs::path& p,const std::string& data){fs::create_directories(p.parent_path());std::ofstream f(p,std::ios::binary|std::ios::trunc);if(!f)throw Failure("could not create file");f.write(data.data(),std::streamsize(data.size()));f.flush();if(!f)throw Failure("could not write file");::chmod(p.c_str(),0600);}
 static std::string slurp(const fs::path& p){std::ifstream f(p,std::ios::binary);if(!f)throw Failure("could not read file");return {std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>()};}
-static void sql(sqlite3* db,const char* stmt){char* err=nullptr;if(sqlite3_exec(db,stmt,nullptr,nullptr,&err)!=SQLITE_OK){std::string m=err?err:"SQL failure";sqlite3_free(err);throw Failure(m);}}
-struct Db {sqlite3* p=nullptr; explicit Db(const fs::path& f){if(sqlite3_open_v2(f.c_str(),&p,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK)throw Failure("Cannot open database");sqlite3_busy_timeout(p,8000);}~Db(){if(p)sqlite3_close(p);}Db(const Db&)=delete;Db& operator=(const Db&)=delete;};
-struct Stmt{sqlite3_stmt* p=nullptr;Stmt(sqlite3* db,const char* s){if(sqlite3_prepare_v2(db,s,-1,&p,nullptr)!=SQLITE_OK)throw Failure(sqlite3_errmsg(db));}~Stmt(){sqlite3_finalize(p);}void bind(int i,const std::string& v){if(sqlite3_bind_text(p,i,v.data(),int(v.size()),SQLITE_TRANSIENT)!=SQLITE_OK)throw Failure("DB bind error");}std::string txt(int i)const{auto s=reinterpret_cast<const char*>(sqlite3_column_text(p,i));return s?s:"";}};
+using Db=rizoma::database::Connection;
+using Stmt=rizoma::database::Statement;
+static void sql(sqlite3* db,const char* statement){rizoma::database::execute(db,statement);}
 static void initialize(const App& app){
  fs::create_directories(app.root/"blobs");fs::create_directories(app.root/"derived");fs::create_directories(app.root/"staging");::chmod(app.root.c_str(),0700);
- Db db(app.root/"rizoma.sqlite3");sql(db.p,"PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
- sql(db.p,R"SQL(
-CREATE TABLE IF NOT EXISTS images(
- id TEXT PRIMARY KEY, filename TEXT NOT NULL, sample_id TEXT NOT NULL, capture_date TEXT NOT NULL,
- created_at TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL,
- width INTEGER NOT NULL, height INTEGER NOT NULL, format TEXT NOT NULL,
- brightness REAL NOT NULL, qc_state TEXT NOT NULL, pipeline TEXT NOT NULL,
- original_path TEXT NOT NULL, preview_path TEXT NOT NULL, grayscale_path TEXT NOT NULL,
- user_id TEXT NOT NULL DEFAULT '',
- user_email TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,image_id TEXT,event TEXT NOT NULL,at TEXT NOT NULL,detail TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS users(
- id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
- created_at TEXT NOT NULL, last_login_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS auth_codes(
- id TEXT PRIMARY KEY, email TEXT NOT NULL, code TEXT NOT NULL, code_hash TEXT NOT NULL,
- expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions(
- token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL,
- created_at TEXT NOT NULL, expires_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
-CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, expires_at);
-)SQL");
- try { sql(db.p, "ALTER TABLE images ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"); } catch(...) {}
- try { sql(db.p, "ALTER TABLE images ADD COLUMN user_email TEXT NOT NULL DEFAULT ''"); } catch(...) {}
- try { sql(db.p, "UPDATE images SET user_id = (SELECT id FROM users WHERE users.email = images.user_email) WHERE user_id = '' AND user_email != '';"); } catch(...) {}
- try { sql(db.p, "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, created_at DESC);"); } catch(...) {}
+ rizoma::database::migrate(app.root/"rizoma.sqlite3");
 }
 static std::string detect_format(const std::string& bytes){
  if(bytes.size()>=8&&png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()),0,8)==0)return "png";
@@ -531,14 +499,13 @@ static void session(tcp::socket socket,App& app){
  }catch(const std::exception& e){std::cerr<<"Connection error: "<<e.what()<<"\n";}
 }
 int main(int argc,char** argv){try{
- ::umask(0077);App app;app.root="./var";app.web="./web";
+ ::umask(0077);App app;app.root="./var";app.web="./web";bool migrate_only=false;
  TIFFSetWarningHandler(nullptr);TIFFSetErrorHandler(nullptr);
- for(int i=1;i<argc;i++){std::string a=argv[i];if(a=="--data-dir"&&i+1<argc)app.root=argv[++i];else if(a=="--web-dir"&&i+1<argc)app.web=argv[++i];else if(a=="--host"&&i+1<argc)app.host=argv[++i];else if(a=="--port"&&i+1<argc){int port=std::stoi(argv[++i]);if(port<1024||port>65535)throw Failure("Port out of range");app.port=static_cast<unsigned short>(port);}else throw Failure("Usage: rizoma-server [--host IP] [--data-dir DIRECTORY] [--web-dir DIRECTORY] [--port 1024..65535]");}
- initialize(app);asio::io_context io;
+ for(int i=1;i<argc;i++){std::string a=argv[i];if(a=="--data-dir"&&i+1<argc)app.root=argv[++i];else if(a=="--web-dir"&&i+1<argc)app.web=argv[++i];else if(a=="--host"&&i+1<argc)app.host=argv[++i];else if(a=="--port"&&i+1<argc){int port=std::stoi(argv[++i]);if(port<1024||port>65535)throw Failure("Port out of range");app.port=static_cast<unsigned short>(port);}else if(a=="--migrate-only")migrate_only=true;else throw Failure("Usage: rizoma-server [--host IP] [--data-dir DIRECTORY] [--web-dir DIRECTORY] [--port 1024..65535] [--migrate-only]");}
+ initialize(app);if(migrate_only){std::cout<<"RIZOMA SQLite migrations complete\n";return 0;}asio::io_context io;
  boost::system::error_code ec;auto addr=asio::ip::make_address(app.host,ec);
  if(ec)throw Failure("Invalid IP address for --host: "+app.host);
  tcp::acceptor acceptor(io,{addr,app.port});
  std::cout<<"RIZOMA v0.2.0 — http://"<<app.host<<":"<<app.port<<(app.host=="127.0.0.1"?" (loopback only)":app.host=="0.0.0.0"?" (all interfaces / LAN)":" (local network)")<<"\n"<<"Data dir: "<<fs::absolute(app.root)<<"\n"<<std::flush;
  for(;;){tcp::socket s(io);acceptor.accept(s);if(app.active.load()>=4){s.close();continue;}++app.active;std::thread(session,std::move(s),std::ref(app)).detach();}
  }catch(const std::exception& e){std::cerr<<"RIZOMA fatal: "<<e.what()<<"\n";return 1;}}
-
