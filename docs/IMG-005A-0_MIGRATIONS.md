@@ -8,6 +8,8 @@ O servidor executa migrações antes de abrir a porta HTTP. `schema_migrations` 
 
 A migração `1 — establish-v0.2.0-schema-and-history` reconhece tanto um banco vazio como o esquema legado 0.2.0. Ela cria estruturas ausentes, adiciona `images.user_id` quando necessário, recupera o vínculo por correspondência exata entre `images.user_email` e `users.email`, cria índices e executa `integrity_check`, `foreign_key_check` e verificação dos vínculos conhecidos.
 
+A migração `2 — analysis-review-foundation` adiciona execuções analíticas, regiões candidatas, julgamentos automáticos e eventos humanos append-only. Os testes de migração constroem seus próprios bancos temporários; não dependem de `var/rizoma.sqlite3` nem de qualquer arquivo local não versionado.
+
 Para validar uma cópia sem iniciar o serviço:
 
 ```bash

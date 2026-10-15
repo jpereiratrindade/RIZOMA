@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -41,6 +42,21 @@ def png(w=32, h=20, color=(124, 158, 142)):
         return struct.pack('!I', len(value)) + body + struct.pack('!I', zlib.crc32(body) & 0xffffffff)
     scanlines = b''.join(b'\x00' + bytes(color)*w for _ in range(h))
     return signature+chunk(b'IHDR',struct.pack('!IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(scanlines))+chunk(b'IEND',b'')
+
+
+def candidate_png(w=64, h=64):
+    signature = b'\x89PNG\r\n\x1a\n'
+    def chunk(kind, value):
+        body = kind + value
+        return struct.pack('!I', len(value)) + body + struct.pack('!I', zlib.crc32(body) & 0xffffffff)
+    rows = []
+    for y in range(h):
+        row = bytearray()
+        for x in range(w):
+            value = 245 if 8 <= y < 52 and 29 <= x < 32 else 25
+            row.extend((value, value, value))
+        rows.append(b'\x00' + bytes(row))
+    return signature+chunk(b'IHDR',struct.pack('!IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(rows)))+chunk(b'IEND',b'')
 
 
 def req(url, method='GET', data=None, headers=None):
@@ -166,6 +182,48 @@ def main():
             status,body,_=req(base+'/api/v1/images/../../etc/passwd',headers=auth_headers)
             assert status in (400,404),(status,body)
 
+            # Integrated experimental analysis -> suggestion -> append-only human review.
+            candidate = candidate_png()
+            candidate_upload = base+'/api/v1/images?filename=candidato-raiz.png&sample_id=ANALISE-01'
+            status,body,_=req(candidate_upload,'POST',candidate,headers)
+            assert status==201,(status,body)
+            analysis_image_id=json.loads(body)['data']['id']
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis','POST',b'',auth_headers)
+            assert status==201,(status,body)
+            analysis=json.loads(body)['data']
+            assert analysis['source_sha256']==hashlib.sha256(candidate).hexdigest()
+            assert analysis['algorithm_version']=='0.1.0-experimental'
+            assert analysis['regions'] and analysis['regions'][0]['suggestion'] in ('ROOT','UNKNOWN'),analysis
+            region=analysis['regions'][0]
+            review_url=base+f"/api/v1/analysis-regions/{region['id']}/reviews"
+            review_headers={'Content-Type':'application/json',**auth_headers}
+            first_review={'action':'CONFIRM','label':region['suggestion'],'justification':'Confirmação "visual" da hipótese experimental','expected_version':0}
+            status,body,_=req(review_url,'POST',json.dumps(first_review).encode(),review_headers)
+            assert status==201 and len(json.loads(body)['data'])==1,(status,body)
+            # Stale expected_version must not overwrite the prior event.
+            stale={'action':'CORRECT','label':'ARTIFACT','justification':'concorrente','expected_version':0}
+            status,body,_=req(review_url,'POST',json.dumps(stale).encode(),review_headers)
+            assert status==409,(status,body)
+            correction={'action':'CORRECT','label':'ARTIFACT','justification':'Correção preservando a interpretação anterior','expected_version':1}
+            status,body,_=req(review_url,'POST',json.dumps(correction).encode(),review_headers)
+            history=json.loads(body)['data']
+            assert status==201 and [event['version'] for event in history]==[1,2]
+            assert [event['label'] for event in history]==[region['suggestion'],'ARTIFACT']
+            suspension={'action':'SUSPEND','label':'UNKNOWN','justification':'Evidência insuficiente; suspender julgamento','expected_version':2}
+            status,body,_=req(review_url,'POST',json.dumps(suspension).encode(),review_headers)
+            history=json.loads(body)['data']
+            assert status==201 and [event['version'] for event in history]==[1,2,3]
+            assert history[0]['justification']=='Confirmação "visual" da hipótese experimental'
+            db=sqlite3.connect(Path(temp)/'rizoma.sqlite3')
+            assert db.execute("SELECT COUNT(*) FROM analysis_judgments WHERE region_id=?",(region['id'],)).fetchone()[0]==1
+            assert db.execute("SELECT COUNT(*) FROM review_events WHERE region_id=?",(region['id'],)).fetchone()[0]==3
+            try:
+                db.execute("UPDATE review_events SET label='ROOT' WHERE region_id=?",(region['id'],))
+                raise AssertionError('append-only review update unexpectedly succeeded')
+            except sqlite3.IntegrityError:
+                pass
+            db.close()
+
             # 7. Multi-user isolation verification (User 2)
             email2 = 'pesquisador2@embrapa.br'
             status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':email2}).encode(),{'Content-Type':'application/json'})
@@ -187,6 +245,12 @@ def main():
             assert status==404, (status,body)
             status,body,_=req(base+'/api/v1/images/'+uid+'/original',headers=auth_headers2)
             assert status==404, (status,body)
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis',headers=auth_headers2)
+            assert status==404,(status,body)
+            status,body,_=req(review_url,headers=auth_headers2)
+            assert status==404,(status,body)
+            status,body,_=req(review_url,'POST',json.dumps({'action':'SUSPEND','label':'UNKNOWN','justification':'x','expected_version':3}).encode(),{'Content-Type':'application/json',**auth_headers2})
+            assert status==404,(status,body)
 
             # User 2 manifest is also isolated and does not leak User 1's entries
             status,body,_=req(base+'/api/v1/export/manifest.csv',headers=auth_headers2)
@@ -206,9 +270,9 @@ def main():
             status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
             assert status==200 and len(json.loads(body)['data'])==1
 
-            # User 1 still sees only their 3 images and cannot access User 2's image
+            # User 1 still sees only their 4 images and cannot access User 2's image
             status,body,_=req(base+'/api/v1/images',headers=auth_headers)
-            assert status==200 and len(json.loads(body)['data'])==3
+            assert status==200 and len(json.loads(body)['data'])==4
             status,body,_=req(base+'/api/v1/images/'+uid2,headers=auth_headers)
             assert status==404, (status,body)
             status,body,_=req(base+'/api/v1/images/'+uid2+'/preview',headers=auth_headers)
@@ -240,7 +304,12 @@ def main():
                     if status==200: break
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
-            assert len(json.loads(body)['data'])==3
+            assert len(json.loads(body)['data'])==4
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis',headers=restarted_headers1)
+            recovered=json.loads(body)['data']
+            assert status==200 and recovered['regions'][0]['review']['label']=='UNKNOWN' and recovered['regions'][0]['review']['action']=='SUSPEND',(status,body)
+            status,body,_=req(review_url,headers=restarted_headers1)
+            assert status==200 and len(json.loads(body)['data'])==3,(status,body)
 
             # Check User 2's isolated catalog after restart
             status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
@@ -249,7 +318,7 @@ def main():
             assert status==200
 
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: @embrapa.br auth, per-user data isolation, OTP generation, session persistence, PNG/JPEG/TIFF, CSV manifest, restart')
+            print('RIZOMA smoke PASS: auth, isolation, images, experimental analysis, append-only review, conflict and restart')
 
         finally:
             if proc.poll() is None:

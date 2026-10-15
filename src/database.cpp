@@ -13,11 +13,13 @@
 namespace rizoma::database {
 namespace {
 
-constexpr int latest_version=1;
+constexpr int latest_version=2;
 constexpr std::string_view migration_name="establish-v0.2.0-schema-and-history";
 // SHA-256 of the reviewed migration specification. Changing migration 1 requires
 // a new migration, never replacement of this checksum.
 constexpr std::string_view migration_checksum="98804c3a9e40c1a58b0d063abec68a58dfc3f1e441a88da8bd371e76fec6d53c";
+constexpr std::string_view analysis_migration_name="analysis-review-foundation";
+constexpr std::string_view analysis_migration_checksum="38fcc3cba031ac0f5228dd3c44d5ca1df8164bf9a185fe0a7d62c89ec34fbf0e";
 
 std::string sqlite_error(sqlite3* db,const std::string& context){
  return context+": "+(db?sqlite3_errmsg(db):"SQLite unavailable");
@@ -100,6 +102,71 @@ CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email,expires_at);
 )SQL");
 }
 
+void apply_migration_2(sqlite3* db){
+ execute(db,R"SQL(
+CREATE TABLE analysis_runs(
+ id TEXT PRIMARY KEY,
+ image_id TEXT NOT NULL REFERENCES images(id),
+ requested_by_user_id TEXT NOT NULL REFERENCES users(id),
+ algorithm TEXT NOT NULL,
+ algorithm_version TEXT NOT NULL,
+ parameters_json TEXT NOT NULL,
+ source_sha256 TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN('RUNNING','REVIEW_REQUIRED','FAILED')),
+ created_at TEXT NOT NULL,
+ completed_at TEXT,
+ error TEXT
+);
+CREATE TABLE analysis_regions(
+ id TEXT PRIMARY KEY,
+ run_id TEXT NOT NULL REFERENCES analysis_runs(id),
+ ordinal INTEGER NOT NULL,
+ x INTEGER NOT NULL CHECK(x>=0), y INTEGER NOT NULL CHECK(y>=0),
+ width INTEGER NOT NULL CHECK(width>0), height INTEGER NOT NULL CHECK(height>0),
+ area INTEGER NOT NULL CHECK(area>0),
+ evidence_json TEXT NOT NULL,
+ current_version INTEGER NOT NULL DEFAULT 0 CHECK(current_version>=0),
+ created_at TEXT NOT NULL,
+ UNIQUE(run_id,ordinal)
+);
+CREATE TABLE analysis_judgments(
+ id TEXT PRIMARY KEY,
+ region_id TEXT NOT NULL REFERENCES analysis_regions(id),
+ actor_type TEXT NOT NULL CHECK(actor_type IN('ALGORITHM','JEV','ENTE')),
+ label TEXT NOT NULL CHECK(label IN('ROOT','UNKNOWN')),
+ evidence_json TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE TABLE review_events(
+ id TEXT PRIMARY KEY,
+ region_id TEXT NOT NULL REFERENCES analysis_regions(id),
+ reviewer_user_id TEXT NOT NULL REFERENCES users(id),
+ version INTEGER NOT NULL CHECK(version>0),
+ action TEXT NOT NULL CHECK(action IN('CONFIRM','CORRECT','SUSPEND')),
+ label TEXT NOT NULL CHECK(label IN('ROOT','MATRIX','ARTIFACT','UNKNOWN')),
+ justification TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ UNIQUE(region_id,version)
+);
+CREATE INDEX idx_analysis_runs_image ON analysis_runs(image_id,created_at DESC);
+CREATE INDEX idx_analysis_regions_run ON analysis_regions(run_id,ordinal);
+CREATE INDEX idx_analysis_judgments_region ON analysis_judgments(region_id,created_at);
+CREATE INDEX idx_review_events_region ON review_events(region_id,version);
+CREATE TRIGGER review_events_immutable_update BEFORE UPDATE ON review_events BEGIN
+ SELECT RAISE(ABORT,'review_events are append-only');
+END;
+CREATE TRIGGER review_events_immutable_delete BEFORE DELETE ON review_events BEGIN
+ SELECT RAISE(ABORT,'review_events are append-only');
+END;
+CREATE TRIGGER analysis_judgments_immutable_update BEFORE UPDATE ON analysis_judgments BEGIN
+ SELECT RAISE(ABORT,'analysis_judgments are immutable');
+END;
+CREATE TRIGGER analysis_judgments_immutable_delete BEFORE DELETE ON analysis_judgments BEGIN
+ SELECT RAISE(ABORT,'analysis_judgments are immutable');
+END;
+)SQL");
+}
+
 void verify_database(sqlite3* db){
  {
   Statement st(db,"PRAGMA integrity_check");
@@ -168,7 +235,7 @@ void migrate(const std::filesystem::path& file){
    version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
   ))SQL");
   Statement known(db,"SELECT version,name,checksum FROM schema_migrations ORDER BY version");
-  bool applied=false;
+  bool applied=false,analysis_applied=false;
   while(sqlite3_step(known.get())==SQLITE_ROW){
    const int version=sqlite3_column_int(known.get(),0);
    if(version>latest_version)throw std::runtime_error("Database was migrated by a newer RIZOMA version");
@@ -177,12 +244,24 @@ void migrate(const std::filesystem::path& file){
     if(known.text(1)!=migration_name||known.text(2)!=migration_checksum)
      throw std::runtime_error("Migration 1 checksum or name does not match the application");
    }
+   if(version==2){
+    analysis_applied=true;
+    if(known.text(1)!=analysis_migration_name||known.text(2)!=analysis_migration_checksum)
+     throw std::runtime_error("Migration 2 checksum or name does not match the application");
+   }
   }
+  if(analysis_applied&&!applied)throw std::runtime_error("Migration history is not contiguous");
   if(!applied){
    apply_migration_1(db);
    Statement record(db,"INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(1,?,?,?)");
    record.bind(1,std::string(migration_name)); record.bind(2,std::string(migration_checksum)); record.bind(3,utc_now());
    if(sqlite3_step(record.get())!=SQLITE_DONE)throw std::runtime_error(sqlite_error(db,"Cannot record migration 1"));
+  }
+  if(!analysis_applied){
+   apply_migration_2(db);
+   Statement record(db,"INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(2,?,?,?)");
+   record.bind(1,std::string(analysis_migration_name));record.bind(2,std::string(analysis_migration_checksum));record.bind(3,utc_now());
+   if(sqlite3_step(record.get())!=SQLITE_DONE)throw std::runtime_error(sqlite_error(db,"Cannot record migration 2"));
   }
   verify_database(db);
   execute(db,"COMMIT");

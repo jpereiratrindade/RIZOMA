@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Focused IMG-005A.0 migration, rollback, preservation and restore evidence."""
 
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -65,7 +64,7 @@ def snapshot(path):
 
 
 def main():
-    executable, operational = sys.argv[1:3]
+    executable = sys.argv[1]
     with tempfile.TemporaryDirectory(prefix="rizoma-migrations-") as temp_name:
         root = Path(temp_name)
 
@@ -100,21 +99,37 @@ def main():
         run(executable, interrupted)
         assert snapshot(interrupted_db)["images"][0][2] == "user-1"
 
-        # Migrate a copy of the repository's operational sample, never the source.
-        copied = root / "operational-copy"
-        copied.mkdir()
-        copied_db = copied / "rizoma.sqlite3"
-        shutil.copy2(operational, copied_db)
-        before = sqlite3.connect(copied_db)
-        counts_before = {table: before.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                         for table in ("users", "sessions", "images")}
-        before.close()
-        run(executable, copied)
-        after = sqlite3.connect(copied_db)
-        counts_after = {table: after.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                        for table in counts_before}
-        after.close()
-        assert counts_after == counts_before
+        # Tampered history, future versions and incompatible legacy shapes fail closed.
+        tampered = root / "tampered"
+        tampered.mkdir()
+        legacy_database(tampered / "rizoma.sqlite3")
+        run(executable, tampered)
+        db = sqlite3.connect(tampered / "rizoma.sqlite3")
+        db.execute("UPDATE schema_migrations SET checksum='tampered' WHERE version=1")
+        db.commit(); db.close()
+        run(executable, tampered, success=False)
+
+        future = root / "future"
+        run(executable, future)
+        db = sqlite3.connect(future / "rizoma.sqlite3")
+        db.execute("INSERT INTO schema_migrations VALUES(99,'future','future','2026-01-01T00:00:00Z')")
+        db.commit(); db.close()
+        run(executable, future, success=False)
+
+        incompatible = root / "incompatible"
+        incompatible.mkdir()
+        db = sqlite3.connect(incompatible / "rizoma.sqlite3")
+        db.execute("CREATE TABLE images(id TEXT PRIMARY KEY)")
+        db.commit(); db.close()
+        run(executable, incompatible, success=False)
+
+        broken_fk = root / "broken-foreign-key"
+        run(executable, broken_fk)
+        db = sqlite3.connect(broken_fk / "rizoma.sqlite3")
+        db.execute("PRAGMA foreign_keys=OFF")
+        db.execute("INSERT INTO sessions VALUES('orphan','missing-user','orphan@embrapa.br','2026-01-01T00:00:00Z','2027-01-01T00:00:00Z')")
+        db.commit(); db.close()
+        run(executable, broken_fk, success=False)
 
         # Consistent online backup and effective isolated restore.
         backup = root / "backup.sqlite3"
@@ -124,11 +139,14 @@ def main():
         destination.close(); source.close()
         restored = root / "restored"
         restored.mkdir()
-        shutil.copy2(backup, restored / "rizoma.sqlite3")
+        restored_db = sqlite3.connect(restored / "rizoma.sqlite3")
+        source = sqlite3.connect(backup)
+        source.backup(restored_db)
+        restored_db.close(); source.close()
         run(executable, restored)
         assert snapshot(restored / "rizoma.sqlite3") == preserved
 
-        print("RIZOMA migrations PASS: empty, legacy, repeat, rollback, preservation, backup restore")
+        print("RIZOMA migrations PASS: clean install, legacy, repeat, rollback, compatibility, backup restore")
 
 
 if __name__ == "__main__":

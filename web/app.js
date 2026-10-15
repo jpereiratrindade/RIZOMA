@@ -18,7 +18,7 @@
 const $ = id => document.getElementById(id);
 const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = new Intl.NumberFormat('pt-BR');
-let images = [], selectedFiles = [], current = null, mode = 'original', currentUser = null;
+let images = [], selectedFiles = [], current = null, mode = 'original', currentUser = null, currentAnalysis = null, selectedRegion = null;
 const viewNames = {acervo:'Acervo de imagens',recebimento:'Recebimento',integridade:'Integridade e origem',sobre:'Sobre o RIZOMA'};
 
 function toast(message){
@@ -256,7 +256,7 @@ function applyZoom(){
   }
 }
 
-function openInspect(id){
+async function openInspect(id){
   current = images.find(x => x.id === id);
   if(!current) return;
   mode = 'original';
@@ -265,6 +265,10 @@ function openInspect(id){
   document.body.style.overflow = 'hidden';
   $('zoom').value = '100';
   fillInspect();
+  currentAnalysis = null;
+  selectedRegion = null;
+  renderAnalysis();
+  try{ const result = await api(`/api/v1/images/${current.id}/analysis`); currentAnalysis = result.data; renderAnalysis(); fillInspect(); if(currentAnalysis) $('start-analysis').textContent='Executar nova análise'; }catch(err){ toast(err.message); }
   $('close-inspect').focus();
 }
 
@@ -287,10 +291,74 @@ function fillInspect(){
     ['Tamanho', `${(current.bytes / 1024 / 1024).toFixed(2)} MiB`],
     ['Responsável', current.user_email || 'Não registrado'],
     ['Preparação', current.pipeline],
-    ['Estado científico', 'NÃO ANALISADA'],
+    ['Estado científico', currentAnalysis ? 'REVISÃO NECESSÁRIA' : 'NÃO ANALISADA'],
     ['SHA-256', current.sha256],
     ['Arquivo Original', `<a href="/api/v1/images/${current.id}/original" download="${h(current.filename)}" class="open-link" style="display:inline-flex;align-items:center;gap:4px">Baixar arquivo original (${current.format.toUpperCase()}) ↗</a>`]
   ].map(([label, value], i) => `<div class="${i >= 9 ? 'hash' : ''}"><dt>${h(label)}</dt><dd>${value}</dd></div>`).join('');
+}
+
+function regionById(id){ return currentAnalysis?.regions?.find(r => r.id === id); }
+
+function selectRegion(id){
+  selectedRegion = regionById(id);
+  renderAnalysis();
+  if(selectedRegion) loadHistory(selectedRegion.id);
+}
+
+function renderAnalysis(){
+  const panel = $('analysis-panel'), overlay = $('region-overlay');
+  if(!currentAnalysis){
+    overlay.innerHTML = '';
+    panel.innerHTML = `<div class="analysis-empty"><strong>Análise ainda não executada</strong><p>Execute o baseline experimental sobre o original preservado. O processamento atual é em memória e restrito ao domínio de ingestão desta versão.</p></div>`;
+    return;
+  }
+  const regions = currentAnalysis.regions || [];
+  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${100*r.x/current.width}%;top:${100*r.y/current.height}%;width:${100*r.width/current.width}%;height:${100*r.height/current.height}%" title="Região ${r.ordinal}: ${r.suggestion}"></button>`).join('');
+  for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
+  const selected = selectedRegion && regionById(selectedRegion.id);
+  panel.innerHTML = `<div class="analysis-head"><div><span class="section-kicker">ANÁLISE EXPERIMENTAL</span><strong>${h(currentAnalysis.algorithm_version)}</strong></div><span class="analysis-count">${number.format(regions.length)} regiões</span></div>
+    <p class="analysis-warning">Sugestões não validadas biologicamente. Coordenadas referem-se ao original SHA-256 <code>${h(currentAnalysis.source_sha256.slice(0,12))}…</code></p>
+    <div class="region-list">${regions.length ? regions.map(r => `<button type="button" data-region-row="${h(r.id)}" class="region-row ${selected?.id === r.id ? 'selected' : ''}"><span>R${r.ordinal}</span><div><strong>${h(r.review?.label || r.suggestion)}</strong><small>${r.review ? 'Revisão humana v'+r.version : 'Sugestão automática'} · ${number.format(r.area)} px candidatos</small></div></button>`).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
+    ${selected ? reviewEditor(selected) : '<p class="choose-region">Selecione uma região na imagem ou na lista para revisar.</p>'}`;
+  for(const row of panel.querySelectorAll('[data-region-row]')) row.onclick = () => selectRegion(row.dataset.regionRow);
+  if($('review-form')) $('review-form').onsubmit = saveReview;
+}
+
+function reviewEditor(region){
+  const label = region.review?.label || region.suggestion;
+  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)}</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar sugestão</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
+}
+
+async function loadHistory(regionId){
+  try{
+    const result = await api(`/api/v1/analysis-regions/${regionId}/reviews`);
+    if(!selectedRegion || selectedRegion.id !== regionId || !$('review-history')) return;
+    $('review-history').innerHTML = result.data.length ? `<h4>Histórico preservado</h4>${result.data.map(e => `<div><strong>v${e.version} · ${h(e.action)} → ${h(e.label)}</strong><small>${h(e.created_at)} · ${h(e.reviewer)}</small><p>${h(e.justification || 'Sem justificativa')}</p></div>`).join('')}` : '<small>Nenhuma revisão humana registrada.</small>';
+  }catch(err){ if($('review-history')) $('review-history').textContent = err.message; }
+}
+
+async function startAnalysis(){
+  if(!current) return;
+  const button = $('start-analysis'); button.disabled = true; button.textContent = 'Analisando…';
+  try{
+    const result = await api(`/api/v1/images/${current.id}/analysis`, {method:'POST'});
+    currentAnalysis = result.data; selectedRegion = currentAnalysis.regions?.[0] || null; renderAnalysis();
+    if(selectedRegion) loadHistory(selectedRegion.id);
+    fillInspect(); toast(`${currentAnalysis.regions.length} região(ões) candidata(s) registrada(s).`);
+  }catch(err){ toast(err.message); }
+  finally{ button.disabled = false; button.textContent = 'Executar nova análise'; }
+}
+
+async function saveReview(event){
+  event.preventDefault(); if(!selectedRegion) return;
+  const action=$('review-action').value;
+  const label=action==='SUSPEND'?'UNKNOWN':$('review-label').value;
+  try{
+    await api(`/api/v1/analysis-regions/${selectedRegion.id}/reviews`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,label,justification:$('review-justification').value.trim(),expected_version:selectedRegion.version})});
+    const result=await api(`/api/v1/images/${current.id}/analysis`);currentAnalysis=result.data;selectedRegion=regionById(selectedRegion.id);renderAnalysis();loadHistory(selectedRegion.id);toast('Revisão salva no histórico.');
+  }catch(err){
+    toast(err.message === 'Review conflict' ? 'Conflito: a região foi revisada em outra sessão. Recarregue a análise.' : err.message);
+  }
 }
 
 function closeInspect(){
@@ -299,6 +367,8 @@ function closeInspect(){
     document.body.style.overflow = '';
   }
   current = null;
+  currentAnalysis = null;
+  selectedRegion = null;
 }
 
 function filesSelected(files){
@@ -370,6 +440,7 @@ document.addEventListener('keydown', e => { if(e.key === 'Escape' && !$('inspect
 for(const b of document.querySelectorAll('[data-image-mode]')) b.onclick = () => { mode = b.dataset.imageMode; fillInspect(); };
 $('zoom').oninput = applyZoom;
 $('inspect-image').onload = applyZoom;
+$('start-analysis').onclick = startAnalysis;
 
 $('menu').onclick = () => {
   const open = $('sidebar').classList.toggle('open');
@@ -397,4 +468,3 @@ $('btn-logout').addEventListener('click', logout);
 const initial = location.hash.slice(1);
 nav(viewNames[initial] ? initial : 'acervo');
 refresh();
-

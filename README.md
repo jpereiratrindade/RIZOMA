@@ -16,8 +16,9 @@ Aplicação autônoma, inspirada na linguagem visual do **TRAMA** e **TRAMA-RS**
 - Registro de nome, identificador opcional de amostra e data opcional de captura; altura/largura, tipo, bytes, SHA-256, data/hora UTC e versão da preparação.
 - Arquivos originais em armazenamento privado endereçado por hash; original nunca sobrescrito pela interface. SHA-256 é identificador do conteúdo, não comprovação de autoria ou garantia de retenção.
 - Prévia redimensionada e derivado em tons de cinza, ambos PNG e separados do original. São arquivos de **inspeção**, não dados científicos para medição.
-- Sinalização operacional de brilho médio da prévia: `REVIEW`, `LOW_LIGHT` e `HIGH_LIGHT`. Não há classificação de raízes nem teste automatizado de qualidade validado cientificamente.
+- Sinalização operacional de brilho médio da prévia: `REVIEW`, `LOW_LIGHT` e `HIGH_LIGHT`. O baseline experimental pode sugerir regiões `ROOT`/`UNKNOWN` para revisão; não há classificação radicular nem teste automatizado validado cientificamente.
 - SQLite com WAL, registro de evento de ingestão, consultas, filtros, inspeção visual e exportação de manifesto CSV.
+- Fluxo experimental integrado de regiões candidatas, sugestão `ROOT`/`UNKNOWN` e revisão humana persistente (`ROOT`, `MATRIX`, `ARTIFACT`, `UNKNOWN`) com histórico append-only.
 - Teste automatizado de HTTP, persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
 
 ## Executar (Fedora / Toolbox)
@@ -86,6 +87,8 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção do usuário autenticado |
 | `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza do usuário autenticado |
 | `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
+| `POST/GET` | `/api/v1/images/{id}/analysis` | Executa ou recupera o baseline experimental e suas regiões |
+| `POST/GET` | `/api/v1/analysis-regions/{id}/reviews` | Registra ou recupera o histórico humano da região |
 
 Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo autenticado:
 
@@ -117,10 +120,10 @@ Arquivo recebido (original, SHA-256, privado)
                                         │
                                         └─► interface de inspeção
 
-[ Em momento futuro: pipelines de segmentação, análise e validação ]
+[ Baseline experimental: regiões candidatas → hipótese → revisão humana persistente ]
 ```
 
-**Nenhum resultado radicular é produzido.** `scientific_status` é sempre `NOT_ANALYZED`. A dimensão da imagem em pixels não equivale a uma medida física. A escala e a orientação EXIF não são aplicadas às prévias; o original mantém os bytes originais.
+**Nenhum resultado radicular validado ou medida biológica é produzido.** As regiões são hipóteses experimentais para revisão humana; um retângulo `ROOT` significa apenas que o pesquisador indicou que a região contém possível raiz. A dimensão da imagem em pixels não equivale a uma medida física. A escala e a orientação EXIF não são aplicadas às prévias; o original mantém os bytes originais.
 
 ## Limitações intencionais e exigências antes de uso multiusuário
 
@@ -145,4 +148,3 @@ Consultar [`docs/RIZOMA-IMG-FOUNDATION-001.md`](docs/RIZOMA-IMG-FOUNDATION-001.m
 ## Licença
 
 Este projeto é software livre licenciado sob a [GNU General Public License v3.0 (GPLv3)](LICENSE).
-
