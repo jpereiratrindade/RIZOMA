@@ -1,7 +1,7 @@
 # RIZOMA — Imagem primeiro
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-**Versão operacional:** `0.2.0` · **Estado:** piloto local (sem autenticação nem publicação externa)  
+**Versão operacional:** `0.2.0` · **Estado:** piloto local com autenticação institucional e acervo isolado por usuário  
 **Licença:** GNU General Public License v3.0 ([GPLv3](LICENSE))  
 **Repositório:** [github.com/jpereiratrindade/RIZOMA](https://github.com/jpereiratrindade/RIZOMA)  
 **Princípio:** *Sempre pronto. Sempre incompleto.*
@@ -59,7 +59,8 @@ O RIZOMA implementa autenticação institucional baseada em **chave temporária 
 - **Registro simplificado:** na primeira solicitação válida, o perfil de usuário é provisionado automaticamente no banco SQLite local.
 - **Chave de 6 dígitos:** gerada de forma criptograficamente segura via OpenSSL, com validade de 15 minutos e consumo único.
 - **Sessão persistente:** após validação da chave, é emitida sessão (token de 64 caracteres) com validade de 7 dias persistida no banco, enviada via cookie `rizoma_session` ou cabeçalho `Authorization: Bearer <token>`.
-- **Rastreabilidade de operador:** toda imagem ingerida passa a ser associada ao e-mail institucional do operador no acervo e no log de eventos.
+- **Isolamento estrito de acervo:** cada usuário autenticado acessa exclusivamente seu próprio acervo de imagens, registros de integridade, arquivos originais/derivados e manifesto CSV de exportação. Requisições entre usuários diferentes são bloqueadas com 404 (evitando enumeração).
+- **Rastreabilidade de operador:** toda imagem ingerida passa a ser vinculada ao e-mail institucional e ao ID do operador no acervo e no log de eventos.
 
 ### Configuração de Envio de E-mail (SMTP)
 
@@ -78,13 +79,13 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `POST` | `/api/v1/auth/verify-code` | Valida código de 6 dígitos e inicia sessão |
 | `GET` | `/api/v1/auth/me` | Consulta dados da sessão atual |
 | `POST` | `/api/v1/auth/logout` | Encerra a sessão ativa |
-| `GET` | `/api/v1/images` | Catálogo local (requer autenticação) |
-| `POST` | `/api/v1/images?...` | Upload de imagem com registro do operador (requer autenticação) |
-| `GET` | `/api/v1/images/{id}` | Metadados da imagem (requer autenticação) |
-| `GET` | `/api/v1/images/{id}/original` | Arquivo original preservado (requer autenticação) |
-| `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção (requer autenticação) |
-| `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza (requer autenticação) |
-| `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados com operador (requer autenticação) |
+| `GET` | `/api/v1/images` | Catálogo de imagens do usuário autenticado |
+| `POST` | `/api/v1/images?...` | Upload de imagem vinculado ao usuário (requer autenticação) |
+| `GET` | `/api/v1/images/{id}` | Metadados da imagem do usuário autenticado |
+| `GET` | `/api/v1/images/{id}/original` | Arquivo original preservado do usuário autenticado |
+| `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção do usuário autenticado |
+| `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza do usuário autenticado |
+| `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
 
 Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo autenticado:
 

@@ -166,7 +166,55 @@ def main():
             status,body,_=req(base+'/api/v1/images/../../etc/passwd',headers=auth_headers)
             assert status in (400,404),(status,body)
 
-            # 7. Test Logout and subsequent rejection
+            # 7. Multi-user isolation verification (User 2)
+            email2 = 'pesquisador2@embrapa.br'
+            status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':email2}).encode(),{'Content-Type':'application/json'})
+            assert status==200
+            otp2 = json.loads(body)['dev_code']
+            status,body,_=req(base+'/api/v1/auth/verify-code','POST',json.dumps({'email':email2,'code':otp2}).encode(),{'Content-Type':'application/json'})
+            assert status==200
+            token2 = json.loads(body)['session_token']
+            auth_headers2 = {'Cookie': f'rizoma_session={token2}'}
+
+            # User 2 catalog must be completely isolated (0 images initially)
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
+            assert status==200 and len(json.loads(body)['data'])==0, (status,body)
+
+            # User 2 cannot access or probe User 1's images (returns 404)
+            status,body,_=req(base+'/api/v1/images/'+uid,headers=auth_headers2)
+            assert status==404, (status,body)
+            status,body,_=req(base+'/api/v1/images/'+uid+'/preview',headers=auth_headers2)
+            assert status==404, (status,body)
+            status,body,_=req(base+'/api/v1/images/'+uid+'/original',headers=auth_headers2)
+            assert status==404, (status,body)
+
+            # User 2 manifest is also isolated and does not leak User 1's entries
+            status,body,_=req(base+'/api/v1/export/manifest.csv',headers=auth_headers2)
+            assert status==200 and email.encode() not in body and b'P01-T2' not in body
+
+            # User 2 uploads their own image
+            data2 = png(color=(80, 120, 200))
+            upload2 = base+'/api/v1/images?filename=raiz_solo.png&sample_id=P02-SOLO&capture_date=2026-10-15'
+            headers2 = {'Content-Type':'application/octet-stream','X-Rizoma-Client':'web-v0.2.0',**auth_headers2}
+            status,body,_=req(upload2,'POST',data2,headers2)
+            assert status==201, (status,body)
+            obj2 = json.loads(body)['data']
+            uid2 = obj2['id']
+            assert obj2['user_email']==email2
+
+            # User 2 sees only their 1 image
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
+            assert status==200 and len(json.loads(body)['data'])==1
+
+            # User 1 still sees only their 3 images and cannot access User 2's image
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers)
+            assert status==200 and len(json.loads(body)['data'])==3
+            status,body,_=req(base+'/api/v1/images/'+uid2,headers=auth_headers)
+            assert status==404, (status,body)
+            status,body,_=req(base+'/api/v1/images/'+uid2+'/preview',headers=auth_headers)
+            assert status==404, (status,body)
+
+            # 8. Test Logout and subsequent rejection
             status,body,_=req(base+'/api/v1/auth/logout','POST',headers=auth_headers)
             assert status==200
             status,body,_=req(base+'/api/v1/auth/me',headers=auth_headers)
@@ -174,27 +222,34 @@ def main():
             status,body,_=req(base+'/api/v1/images',headers=auth_headers)
             assert status==401
 
-            # 8. Re-authenticate for persistence across restart
+            # 9. Re-authenticate User 1 for persistence across restart
             status,body,_=req(base+'/api/v1/auth/request-code','POST',json.dumps({'email':email}).encode(),{'Content-Type':'application/json'})
             assert status==200
             new_code = json.loads(body)['dev_code']
             status,body,_=req(base+'/api/v1/auth/verify-code','POST',json.dumps({'email':email,'code':new_code}).encode(),{'Content-Type':'application/json'})
             assert status==200
             new_token = json.loads(body)['session_token']
-            restarted_headers = {'Cookie': f'rizoma_session={new_token}'}
+            restarted_headers1 = {'Cookie': f'rizoma_session={new_token}'}
 
-            # Persistence after an actual restart
+            # Persistence after an actual restart for both users
             proc.terminate(); proc.wait(timeout=6)
             proc=subprocess.Popen([exe,'--host','127.0.0.1','--data-dir',temp,'--web-dir',web,'--port',str(port)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             for _ in range(80):
                 try:
-                    status,body,_=req(base+'/api/v1/images',headers=restarted_headers)
+                    status,body,_=req(base+'/api/v1/images',headers=restarted_headers1)
                     if status==200: break
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
             assert len(json.loads(body)['data'])==3
+
+            # Check User 2's isolated catalog after restart
+            status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
+            assert status==200 and len(json.loads(body)['data'])==1
+            status,body,_=req(base+'/api/v1/images/'+uid2,headers=auth_headers2)
+            assert status==200
+
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: @embrapa.br auth, OTP generation/validation, session persistence, PNG/JPEG/TIFF, checksum, CSV, restart')
+            print('RIZOMA smoke PASS: @embrapa.br auth, per-user data isolation, OTP generation, session persistence, PNG/JPEG/TIFF, CSV manifest, restart')
 
         finally:
             if proc.poll() is None:

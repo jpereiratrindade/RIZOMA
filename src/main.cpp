@@ -157,10 +157,11 @@ static void initialize(const App& app){
  sql(db.p,R"SQL(
 CREATE TABLE IF NOT EXISTS images(
  id TEXT PRIMARY KEY, filename TEXT NOT NULL, sample_id TEXT NOT NULL, capture_date TEXT NOT NULL,
- created_at TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL,
+ created_at TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL,
  width INTEGER NOT NULL, height INTEGER NOT NULL, format TEXT NOT NULL,
  brightness REAL NOT NULL, qc_state TEXT NOT NULL, pipeline TEXT NOT NULL,
  original_path TEXT NOT NULL, preview_path TEXT NOT NULL, grayscale_path TEXT NOT NULL,
+ user_id TEXT NOT NULL DEFAULT '',
  user_email TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,image_id TEXT,event TEXT NOT NULL,at TEXT NOT NULL,detail TEXT NOT NULL);
@@ -177,11 +178,15 @@ CREATE TABLE IF NOT EXISTS sessions(
  created_at TEXT NOT NULL, expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, expires_at);
 )SQL");
+ try { sql(db.p, "ALTER TABLE images ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"); } catch(...) {}
  try { sql(db.p, "ALTER TABLE images ADD COLUMN user_email TEXT NOT NULL DEFAULT ''"); } catch(...) {}
+ try { sql(db.p, "UPDATE images SET user_id = (SELECT id FROM users WHERE users.email = images.user_email) WHERE user_id = '' AND user_email != '';"); } catch(...) {}
+ try { sql(db.p, "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, created_at DESC);"); } catch(...) {}
 }
 static std::string detect_format(const std::string& bytes){
  if(bytes.size()>=8&&png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()),0,8)==0)return "png";
@@ -235,15 +240,48 @@ static int nib(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c
 static std::string decode_uri(const std::string& s){std::string v;for(std::size_t i=0;i<s.size();++i){if(s[i]=='%'&&i+2<s.size()&&nib(s[i+1])>=0&&nib(s[i+2])>=0){v+=char((nib(s[i+1])<<4)|nib(s[i+2]));i+=2;}else if(s[i]=='+')v+=' ';else v+=s[i];}return v;}
 static std::map<std::string,std::string> params(const std::string& path){std::map<std::string,std::string> p;auto pos=path.find('?');if(pos==std::string::npos)return p;std::string tail=path.substr(pos+1);std::istringstream in(tail);std::string part;while(std::getline(in,part,'&')){auto eq=part.find('=');if(eq!=std::string::npos)p[decode_uri(part.substr(0,eq))]=decode_uri(part.substr(eq+1));}return p;}
 static std::string col(sqlite3_stmt* st,int i){auto p=reinterpret_cast<const char*>(sqlite3_column_text(st,i));return p?p:"";}
-static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int(st,7)<<",\"height\":"<<sqlite3_column_int(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"user_email\":"<<q(col(st,13))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
-constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,user_email";
-static std::string all_images(const App& app){Db d(app.root/"rizoma.sqlite3");auto stm=std::string("SELECT ")+fields+" FROM images ORDER BY created_at DESC, id DESC LIMIT 500";Stmt st(d.p,stm.c_str());std::string out="{\"schema\":\"rizoma.images.v0.2.0\",\"data\":[";bool first=true;while(sqlite3_step(st.p)==SQLITE_ROW){if(!first)out+=",";first=false;out+=row_json(st.p);}out+="]}";return out;}
-static std::string one_image(const App& app,const std::string& id){Db d(app.root/"rizoma.sqlite3");auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=?";Stmt st(d.p,stm.c_str());st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");return "{\"data\":"+row_json(st.p)+"}";}
+static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int(st,7)<<",\"height\":"<<sqlite3_column_int(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"user_email\":"<<q(col(st,13))<<",\"user_id\":"<<q(col(st,14))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
+constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,user_email,user_id";
+static std::string all_images(const App& app,const std::string& user_id){
+ Db d(app.root/"rizoma.sqlite3");
+ auto stm=std::string("SELECT ")+fields+" FROM images WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 500";
+ Stmt st(d.p,stm.c_str());
+ st.bind(1,user_id);
+ std::string out="{\"schema\":\"rizoma.images.v0.2.0\",\"data\":[";
+ bool first=true;
+ while(sqlite3_step(st.p)==SQLITE_ROW){if(!first)out+=",";first=false;out+=row_json(st.p);}
+ out+="]}";
+ return out;
+}
+static std::string one_image(const App& app,const std::string& id,const std::string& user_id){
+ Db d(app.root/"rizoma.sqlite3");
+ auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=? AND user_id=?";
+ Stmt st(d.p,stm.c_str());
+ st.bind(1,id);
+ st.bind(2,user_id);
+ if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
+ return "{\"data\":"+row_json(st.p)+"}";
+}
 static std::string csv_cell(const std::string& s){std::string x=s;if(!x.empty()&&(x[0]=='='||x[0]=='+'||x[0]=='-'||x[0]=='@'))x="'"+x;std::string out="\"";for(char c:x){if(c=='"')out+="\"\"";else if(c!='\r'&&c!='\n')out+=c;}return out+"\"";}
-static std::string manifest(const App& app){Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email FROM images ORDER BY created_at DESC");std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email,scientific_status\r\n";while(sqlite3_step(st.p)==SQLITE_ROW){for(int i=0;i<13;++i){if(i)r+=",";r+=csv_cell(col(st.p,i));}r+=",\"NOT_ANALYZED\"\r\n";}return r;}
-static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime){
- Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format FROM images WHERE id=?");
- st.bind(1,id);if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
+static std::string manifest(const App& app,const std::string& user_id){
+ Db d(app.root/"rizoma.sqlite3");
+ Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email FROM images WHERE user_id=? ORDER BY created_at DESC");
+ st.bind(1,user_id);
+ std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email,scientific_status\r\n";
+ while(sqlite3_step(st.p)==SQLITE_ROW){
+  for(int i=0;i<13;++i){
+   if(i)r+=",";
+   r+=csv_cell(col(st.p,i));
+  }
+  r+=",\"NOT_ANALYZED\"\r\n";
+ }
+ return r;
+}
+static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime,const std::string& user_id){
+ Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format FROM images WHERE id=? AND user_id=?");
+ st.bind(1,id);
+ st.bind(2,user_id);
+ if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
  std::string fmt=col(st.p,3);
  if(kind=="original-view"){
   if(fmt=="tiff"){
@@ -271,11 +309,16 @@ static std::string media(const App& app,const std::string& id,const std::string&
  return slurp(app.root/stored);
 }
 struct Ingested{std::string id;std::string json;};
-static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured,const std::string& user_email){
+static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured,const std::string& user_id,const std::string& user_email){
  if(bytes.empty()||bytes.size()>MAX_UPLOAD)throw Failure("Image must contain data and be at most 12 MiB");
  if(!sample_ok(sample)||!date_ok(captured))throw Failure("Invalid sample identifier or capture date");
  auto fmt=detect_format(bytes);auto raster=decode(bytes,fmt);auto hash=hash256(bytes);
- Db db(app.root/"rizoma.sqlite3");{Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=?");lookup.bind(1,hash);if(sqlite3_step(lookup.p)==SQLITE_ROW)throw Failure("An identical original is already registered (SHA-256 duplicate)");}
+ Db db(app.root/"rizoma.sqlite3");{
+  Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=? AND user_id=?");
+  lookup.bind(1,hash);
+  lookup.bind(2,user_id);
+  if(sqlite3_step(lookup.p)==SQLITE_ROW)throw Failure("An identical original is already registered in your collection (SHA-256 duplicate)");
+ }
  double brightness=0,unused=0;auto thumb=preview(raster,false,brightness);auto gray=preview(raster,true,unused);
  auto thumbbytes=png_encode(thumb),graybytes=png_encode(gray);
  const std::string id=rand_id();const std::string ext=fmt=="png"?"png":fmt=="jpeg"?"jpg":"tif";
@@ -286,11 +329,11 @@ static Ingested ingest(const App& app,const std::string& bytes,const std::string
  if(fmt=="tiff")put(app.root/("derived/"+id+"/original_view.png"), png_encode(raster));
  const std::string state=brightness<35?"LOW_LIGHT":brightness>220?"HIGH_LIGHT":"REVIEW";
  sql(db.p,"BEGIN IMMEDIATE");try{
- Stmt st(db.p,"INSERT INTO images(id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,original_path,preview_path,grayscale_path,user_email) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
- st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc_offset(0));st.bind(6,hash);sqlite3_bind_int64(st.p,7,sqlite3_int64(bytes.size()));sqlite3_bind_int(st.p,8,raster.w);sqlite3_bind_int(st.p,9,raster.h);st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);st.bind(17,user_email);
+ Stmt st(db.p,"INSERT INTO images(id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,original_path,preview_path,grayscale_path,user_email,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+ st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc_offset(0));st.bind(6,hash);sqlite3_bind_int64(st.p,7,sqlite3_int64(bytes.size()));sqlite3_bind_int(st.p,8,raster.w);sqlite3_bind_int(st.p,9,raster.h);st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);st.bind(17,user_email);st.bind(18,user_id);
  if(sqlite3_step(st.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
- Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED',?,?)");ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,hash+" | "+user_email);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
- return {id,one_image(app,id)};
+ Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED',?,?)");ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,hash+" | "+user_id+" | "+user_email);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+ return {id,one_image(app,id,user_id)};
 }
 using Response=http::response<http::string_body>;
 static Response respond(http::status s,unsigned version,std::string body,std::string mime="application/json; charset=utf-8"){
@@ -448,19 +491,19 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   if(!user){
    return problem(v,http::status::unauthorized,"Autenticação necessária. Acesse com seu e-mail institucional @embrapa.br.");
   }
-  if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app));
-  if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app),"text/csv; charset=utf-8");
+  if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app,user->id));
+  if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app,user->id),"text/csv; charset=utf-8");
   if(req.method()==http::verb::post&&p=="/api/v1/images"){
    if(req.find("X-Rizoma-Client")==req.end()||req["X-Rizoma-Client"]!="web-v0.2.0")return problem(v,http::status::forbidden,"Client header required");
    if(req[http::field::content_type]!="application/octet-stream")return problem(v,http::status::unsupported_media_type,"Use application/octet-stream");
    if(req.body().size()>MAX_UPLOAD)return problem(v,http::status::payload_too_large,"File exceeds upload limit");
-   try{auto ret=ingest(app,req.body(),args["filename"],args["sample_id"],args["capture_date"],user->email);return respond(http::status::created,v,ret.json);}
+   try{auto ret=ingest(app,req.body(),args["filename"],args["sample_id"],args["capture_date"],user->id,user->email);return respond(http::status::created,v,ret.json);}
    catch(const Failure& e){std::string m=e.what();http::status st=m.find("already registered")!=std::string::npos?http::status::conflict:m.find("Only PNG")!=std::string::npos?http::status::unsupported_media_type:m.find("exceeds")!=std::string::npos?http::status::payload_too_large:http::status::unprocessable_entity;return problem(v,st,m);}
   }
   if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
    std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id));auto kind=rem.substr(slash+1);if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
-   std::string mime;std::string binary=media(app,id,kind,mime);return respond(http::status::ok,v,std::move(binary),mime);
+   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
+   std::string mime;std::string binary=media(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(binary),mime);
    }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
   }
  }
