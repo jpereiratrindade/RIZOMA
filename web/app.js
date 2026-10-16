@@ -19,6 +19,7 @@ const $ = id => document.getElementById(id);
 const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = new Intl.NumberFormat('pt-BR');
 let images = [], selectedFiles = [], current = null, mode = 'original', currentUser = null, currentAnalysis = null, analysisRuns = [], selectedRegion = null;
+let viewer = {imageId:null, manifest:null, scale:1, x:0, y:0, fit:true, drag:null, revision:0, frame:0};
 const viewNames = {acervo:'Acervo de imagens',recebimento:'Recebimento',integridade:'Integridade e origem',sobre:'Sobre o RIZOMA'};
 
 function toast(message){
@@ -232,27 +233,105 @@ async function refresh(){
   }
 }
 
-function applyZoom(){
-  const z = Number($('zoom').value) || 100;
-  $('zoomvalue').textContent = z + '%';
-  const img = $('inspect-image');
-  if(!img) return;
-  if(z === 100){
-    img.style.maxWidth = '100%';
-    img.style.maxHeight = '46vh';
-    img.style.width = 'auto';
-    img.style.height = 'auto';
-  } else {
-    const stage = img.parentElement;
-    const stageW = Math.max(240, (stage ? stage.clientWidth : 600) - 48);
-    const stageH = Math.max(200, (stage ? stage.clientHeight : 350) - 48);
-    const aspect = (current && current.width && current.height) ? (current.width / current.height) : (img.naturalWidth ? img.naturalWidth / img.naturalHeight : 1);
-    let baseW = stageW;
-    if(baseW / aspect > stageH) baseW = stageH * aspect;
-    img.style.maxWidth = 'none';
-    img.style.maxHeight = 'none';
-    img.style.width = Math.round(baseW * (z / 100)) + 'px';
-    img.style.height = 'auto';
+function clampViewer(){
+  if(!current) return;
+  const stage = $('image-stage'), width = current.width * viewer.scale, height = current.height * viewer.scale;
+  viewer.x = width <= stage.clientWidth ? (stage.clientWidth - width) / 2 : Math.min(0, Math.max(stage.clientWidth - width, viewer.x));
+  viewer.y = height <= stage.clientHeight ? (stage.clientHeight - height) / 2 : Math.min(0, Math.max(stage.clientHeight - height, viewer.y));
+}
+
+function scheduleTiles(){
+  cancelAnimationFrame(viewer.frame);
+  viewer.frame = requestAnimationFrame(renderTiles);
+}
+
+function renderViewer(){
+  if(!current || viewer.imageId !== current.id) return;
+  clampViewer();
+  $('analysis-canvas').style.width = current.width + 'px';
+  $('analysis-canvas').style.height = current.height + 'px';
+  $('analysis-canvas').style.transform = `translate(${viewer.x}px,${viewer.y}px) scale(${viewer.scale})`;
+  $('zoom').value = String(Math.max(Number($('zoom').min), Math.min(Number($('zoom').max), viewer.scale * 100)));
+  $('zoomvalue').textContent = `${Math.round(viewer.scale * 100)}%`;
+  scheduleTiles();
+}
+
+function fitViewer(){
+  if(!current) return;
+  const stage = $('image-stage');
+  viewer.scale = Math.min(1, Math.max(.001, Math.min((stage.clientWidth - 24) / current.width, (stage.clientHeight - 24) / current.height)));
+  viewer.fit = true; viewer.x = 0; viewer.y = 0;
+  $('zoom').min = String(Math.max(.1, viewer.scale * 50));
+  renderViewer();
+}
+
+function setViewerZoom(next, anchorX, anchorY){
+  if(!current) return;
+  const stage = $('image-stage');
+  const old = viewer.scale;
+  next = Math.min(8, Math.max(Math.max(.001, Number($('zoom').min) / 100), next));
+  const ax = anchorX ?? stage.clientWidth / 2, ay = anchorY ?? stage.clientHeight / 2;
+  const imageX = (ax - viewer.x) / old, imageY = (ay - viewer.y) / old;
+  viewer.scale = next; viewer.x = ax - imageX * next; viewer.y = ay - imageY * next; viewer.fit = false;
+  renderViewer();
+}
+
+function renderViewerMode(){
+  const filter = mode === 'negative' ? 'invert(1)' : mode === 'grayscale' ? 'grayscale(1)' : '';
+  $('inspect-image').style.filter = filter;
+  $('tile-layer').style.filter = filter;
+  $('tile-layer').classList.toggle('hidden', mode === 'preview');
+  if(mode === 'preview') $('pyramid-status').textContent = 'Prévia integral · visualização de inspeção';
+  else scheduleTiles();
+}
+
+function renderTiles(){
+  if(!current || viewer.imageId !== current.id || !viewer.manifest || mode === 'preview') return;
+  const stage = $('image-stage'), layer = $('tile-layer'), levels = viewer.manifest.levels;
+  const density = viewer.scale * (window.devicePixelRatio || 1);
+  let level = levels[levels.length - 1];
+  for(const candidate of levels){ if(candidate.width / current.width >= density * .85){ level = candidate; break; } }
+  const left = Math.max(0, -viewer.x / viewer.scale), top = Math.max(0, -viewer.y / viewer.scale);
+  const right = Math.min(current.width, (stage.clientWidth - viewer.x) / viewer.scale), bottom = Math.min(current.height, (stage.clientHeight - viewer.y) / viewer.scale);
+  const tileSize = viewer.manifest.tile_size, factorX = current.width / level.width, factorY = current.height / level.height;
+  const minX = Math.max(0, Math.floor(left / factorX / tileSize) - 1), minY = Math.max(0, Math.floor(top / factorY / tileSize) - 1);
+  const maxX = Math.min(level.columns - 1, Math.floor(Math.max(0, right - 1) / factorX / tileSize) + 1), maxY = Math.min(level.rows - 1, Math.floor(Math.max(0, bottom - 1) / factorY / tileSize) + 1);
+  const wanted = new Set();
+  for(let y = minY; y <= maxY; y++) for(let x = minX; x <= maxX; x++){
+    const key = `${level.level}:${x}:${y}`; wanted.add(key);
+    if(layer.querySelector(`[data-tile="${key}"]`)) continue;
+    const image = document.createElement('img'); image.dataset.tile = key; image.alt = ''; image.draggable = false;
+    const lx = x * tileSize, ly = y * tileSize, lw = Math.min(tileSize, level.width - lx), lh = Math.min(tileSize, level.height - ly);
+    image.style.left = `${lx * factorX}px`; image.style.top = `${ly * factorY}px`; image.style.width = `${lw * factorX + .25}px`; image.style.height = `${lh * factorY + .25}px`;
+    image.onload = image.onerror = () => updateTileStatus(level);
+    image.src = level.url_template.replace('{x}', x).replace('{y}', y);
+    layer.append(image);
+  }
+  for(const image of Array.from(layer.children)) if(!wanted.has(image.dataset.tile)) image.remove();
+  updateTileStatus(level);
+}
+
+function updateTileStatus(level){
+  const tiles = Array.from($('tile-layer').children), loaded = tiles.filter(image => image.complete && image.naturalWidth).length;
+  $('pyramid-status').textContent = `Pirâmide ${level.level + 1}/${viewer.manifest.levels.length} · ${loaded}/${tiles.length} blocos visíveis`;
+  $('image-stage').classList.toggle('tiles-loading', loaded < tiles.length);
+}
+
+async function initializeViewer(imageId){
+  const revision = ++viewer.revision;
+  viewer.imageId = imageId; viewer.manifest = null; viewer.drag = null; viewer.fit = true;
+  $('tile-layer').replaceChildren();
+  $('inspect-image').src = `/api/v1/images/${imageId}/preview`;
+  $('pyramid-status').textContent = 'Carregando pirâmide progressiva…';
+  renderViewerMode();
+  requestAnimationFrame(fitViewer);
+  try{
+    const manifest = await api(`/api/v1/images/${imageId}/pyramid`);
+    if(revision !== viewer.revision || !current || current.id !== imageId) return;
+    viewer.manifest = manifest; renderViewer();
+  }catch(err){
+    if(revision !== viewer.revision) return;
+    $('pyramid-status').textContent = 'Prévia disponível · pirâmide indisponível'; toast(err.message);
   }
 }
 
@@ -263,7 +342,7 @@ async function openInspect(id){
   $('inspect-title').textContent = current.filename;
   $('inspector').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
-  $('zoom').value = '100';
+  initializeViewer(current.id);
   fillInspect();
   currentAnalysis = null;
   analysisRuns = [];
@@ -280,13 +359,7 @@ function fillInspect(){
   if(!current) return;
   for(const b of document.querySelectorAll('[data-image-mode]'))
     b.classList.toggle('active', b.dataset.imageMode === mode);
-  const src = (mode === 'original' || mode === 'negative')
-    ? `/api/v1/images/${current.id}/original-view`
-    : `/api/v1/images/${current.id}/${mode}`;
-  const img = $('inspect-image');
-  img.src = src;
-  img.style.filter = mode === 'negative' ? 'invert(1)' : '';
-  applyZoom();
+  renderViewerMode();
   $('inspect-metadata').innerHTML = [
     ['Identificador', current.id],
     ['Amostra', current.sample_id || 'Não informada'],
@@ -326,7 +399,7 @@ function renderAnalysis(){
     return;
   }
   const regions = currentAnalysis.regions || [];
-  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${100*r.x/current.width}%;top:${100*r.y/current.height}%;width:${100*r.width/current.width}%;height:${100*r.height/current.height}%" title="Região ${r.ordinal}: ${h(automaticLabel(r.suggestion))}"></button>`).join('');
+  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px" title="Região ${r.ordinal}: ${h(automaticLabel(r.suggestion))}"></button>`).join('');
   for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
   const selected = selectedRegion && regionById(selectedRegion.id);
   panel.innerHTML = `<div class="analysis-head"><div><span class="section-kicker">ANÁLISE EXPERIMENTAL</span><strong>${h(currentAnalysis.algorithm_version)}</strong></div><span class="analysis-count">${number.format(regions.length)} regiões</span></div>
@@ -397,6 +470,8 @@ function closeInspect(){
   currentAnalysis = null;
   analysisRuns = [];
   selectedRegion = null;
+  viewer.revision++; viewer.imageId = null; viewer.manifest = null; viewer.drag = null;
+  cancelAnimationFrame(viewer.frame); $('tile-layer').replaceChildren(); $('inspect-image').removeAttribute('src');
 }
 
 function filesSelected(files){
@@ -421,16 +496,15 @@ async function upload(e){
     status.textContent = `Enviando ${i + 1}/${selectedFiles.length}: ${file.name}…`;
     results.append(status);
     try{
-      if(file.size > 12 * 1024 * 1024) throw Error('Arquivo acima de 12 MiB');
+      if(file.size > 8 * 1024 * 1024 * 1024) throw Error('Arquivo acima do limite operacional de 8 GiB');
       const url = new URL('/api/v1/images', location.href);
       url.searchParams.set('filename', file.name);
       url.searchParams.set('sample_id', sample);
       url.searchParams.set('capture_date', date);
-      const body = await file.arrayBuffer();
       await api(url.pathname + url.search, {
         method: 'POST',
         headers: {'Content-Type': 'application/octet-stream', 'X-Rizoma-Client': 'web-v0.2.0'},
-        body
+        body: file
       });
       status.textContent = `✓ ${file.name}: original preservado e prévias geradas.`;
       successes++;
@@ -466,9 +540,55 @@ $('inspector').addEventListener('click', e => { if(e.target === $('inspector')) 
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && !$('inspector').classList.contains('hidden')) closeInspect(); });
 
 for(const b of document.querySelectorAll('[data-image-mode]')) b.onclick = () => { mode = b.dataset.imageMode; fillInspect(); };
-$('zoom').oninput = applyZoom;
-$('inspect-image').onload = applyZoom;
+$('zoom').oninput = e => setViewerZoom(Number(e.target.value) / 100);
+$('zoom-in').onclick = () => setViewerZoom(viewer.scale * 1.35);
+$('zoom-out').onclick = () => setViewerZoom(viewer.scale / 1.35);
+$('zoom-fit').onclick = fitViewer;
+$('zoom-actual').onclick = () => setViewerZoom(1);
 $('start-analysis').onclick = startAnalysis;
+
+const imageStage = $('image-stage');
+imageStage.addEventListener('wheel', e => {
+  if(!current) return;
+  e.preventDefault();
+  const bounds = imageStage.getBoundingClientRect();
+  setViewerZoom(viewer.scale * Math.exp(-e.deltaY * .0015), e.clientX - bounds.left, e.clientY - bounds.top);
+}, {passive:false});
+imageStage.addEventListener('pointerdown', e => {
+  if(!current || e.button !== 0 || e.target.closest('.region-box')) return;
+  viewer.drag = {pointer:e.pointerId, clientX:e.clientX, clientY:e.clientY, x:viewer.x, y:viewer.y};
+  imageStage.setPointerCapture(e.pointerId); imageStage.classList.add('panning');
+});
+imageStage.addEventListener('pointermove', e => {
+  const bounds = imageStage.getBoundingClientRect();
+  const imageX = Math.floor((e.clientX - bounds.left - viewer.x) / viewer.scale), imageY = Math.floor((e.clientY - bounds.top - viewer.y) / viewer.scale);
+  $('cursor-position').textContent = current && imageX >= 0 && imageY >= 0 && imageX < current.width && imageY < current.height ? `x ${number.format(imageX)} · y ${number.format(imageY)}` : '—';
+  if(!viewer.drag || viewer.drag.pointer !== e.pointerId) return;
+  viewer.x = viewer.drag.x + e.clientX - viewer.drag.clientX; viewer.y = viewer.drag.y + e.clientY - viewer.drag.clientY;
+  viewer.fit = false; renderViewer();
+});
+function stopViewerDrag(e){
+  if(!viewer.drag || viewer.drag.pointer !== e.pointerId) return;
+  viewer.drag = null; imageStage.classList.remove('panning');
+}
+imageStage.addEventListener('pointerup', stopViewerDrag);
+imageStage.addEventListener('pointercancel', stopViewerDrag);
+imageStage.addEventListener('pointerleave', () => { if(!viewer.drag) $('cursor-position').textContent = '—'; });
+imageStage.addEventListener('dblclick', e => {
+  const bounds = imageStage.getBoundingClientRect(); setViewerZoom(viewer.scale * 2, e.clientX - bounds.left, e.clientY - bounds.top);
+});
+imageStage.addEventListener('keydown', e => {
+  if(!current) return;
+  if(e.key === '+' || e.key === '=') setViewerZoom(viewer.scale * 1.25);
+  else if(e.key === '-') setViewerZoom(viewer.scale / 1.25);
+  else if(e.key === '0') fitViewer();
+  else if(e.key === '1') setViewerZoom(1);
+  else if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+    const delta=60;if(e.key==='ArrowLeft')viewer.x+=delta;if(e.key==='ArrowRight')viewer.x-=delta;if(e.key==='ArrowUp')viewer.y+=delta;if(e.key==='ArrowDown')viewer.y-=delta;viewer.fit=false;renderViewer();
+  } else return;
+  e.preventDefault();
+});
+window.addEventListener('resize', () => { if(!current) return; if(viewer.fit) fitViewer(); else renderViewer(); });
 
 $('menu').onclick = () => {
   const open = $('sidebar').classList.toggle('open');
@@ -499,4 +619,3 @@ refresh();
 
 // Previne o zoom acidental da pagina inteira pelo navegador via Ctrl + Roda do mouse
 window.addEventListener('wheel', e => { if(e.ctrlKey) e.preventDefault(); }, { passive: false });
-

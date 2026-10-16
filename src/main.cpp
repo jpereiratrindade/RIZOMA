@@ -25,9 +25,12 @@
 #include <tiffio.h>
 #include "database.hpp"
 #include "analysis.hpp"
+#include "tiles.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -57,10 +60,12 @@ namespace asio=boost::asio;
 namespace beast=boost::beast;
 namespace http=beast::http;
 using tcp=asio::ip::tcp;
-constexpr std::size_t MAX_UPLOAD=12*1024*1024;
+constexpr std::uint64_t MAX_UPLOAD=8ULL*1024*1024*1024;
+constexpr std::size_t MAX_CONTROL_BODY=1024*1024;
 constexpr std::uint64_t MAX_PIXELS=12'000'000;
 constexpr int THUMB_MAX=1280;
-constexpr const char* PIPELINE="rizoma-inspection-0.2.0";
+constexpr int TILE_SIZE=256;
+constexpr const char* PIPELINE="rizoma-exp004-progressive-0.4.0";
 struct Failure : std::runtime_error {using std::runtime_error::runtime_error;};
 struct Raster {int w=0,h=0;std::vector<unsigned char> rgba;};
 struct App {fs::path root,web; std::string host="127.0.0.1"; unsigned short port=8089; std::atomic<int>active{0};};
@@ -70,6 +75,13 @@ static std::string esc(std::string_view s){std::string out;out.reserve(s.size()+
 static std::string q(std::string_view s){return "\""+esc(s)+"\"";}
 static std::string hex(const unsigned char* ptr,std::size_t n){static const char h[]="0123456789abcdef";std::string out;out.reserve(n*2);for(std::size_t i=0;i<n;++i){out+=h[ptr[i]>>4];out+=h[ptr[i]&15];}return out;}
 static std::string hash256(const std::string& data){unsigned char dig[EVP_MAX_MD_SIZE];unsigned int len=0;if(EVP_Digest(data.data(),data.size(),dig,&len,EVP_sha256(),nullptr)!=1)throw Failure("SHA-256 unavailable");return hex(dig,len);}
+static std::string hash256_file(const fs::path& path){
+ std::ifstream input(path,std::ios::binary);if(!input)throw Failure("could not hash staged file");
+ std::unique_ptr<EVP_MD_CTX,decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),EVP_MD_CTX_free);
+ if(!context||EVP_DigestInit_ex(context.get(),EVP_sha256(),nullptr)!=1)throw Failure("SHA-256 unavailable");
+ std::array<char,65536> block{};while(input){input.read(block.data(),block.size());auto count=input.gcount();if(count>0&&EVP_DigestUpdate(context.get(),block.data(),static_cast<std::size_t>(count))!=1)throw Failure("SHA-256 failed");}
+ unsigned char digest[EVP_MAX_MD_SIZE];unsigned int length=0;if(EVP_DigestFinal_ex(context.get(),digest,&length)!=1)throw Failure("SHA-256 failed");return hex(digest,length);
+}
 static std::string rand_id(){unsigned char b[12];if(RAND_bytes(b,sizeof(b))!=1)throw Failure("random generator unavailable");return hex(b,sizeof(b));}
 static std::string rand_otp(){unsigned int val=0;if(RAND_bytes(reinterpret_cast<unsigned char*>(&val),sizeof(val))!=1)throw Failure("random generator unavailable");val%=1000000;char buf[8];std::snprintf(buf,sizeof(buf),"%06u",val);return buf;}
 static std::string rand_session_token(){unsigned char b[32];if(RAND_bytes(b,sizeof(b))!=1)throw Failure("random generator unavailable");return hex(b,sizeof(b));}
@@ -231,6 +243,33 @@ static Raster decode(const std::string& s,const std::string& fmt){
 }
 static std::string png_encode(const Raster& r){png_image im{};im.version=PNG_IMAGE_VERSION;im.width=r.w;im.height=r.h;im.format=PNG_FORMAT_RGBA;png_alloc_size_t n=0;if(!png_image_write_to_memory(&im,nullptr,&n,0,r.rgba.data(),0,nullptr))throw Failure("Preview encoding failed");std::string data(std::size_t(n),'\0');if(!png_image_write_to_memory(&im,data.data(),&n,0,r.rgba.data(),0,nullptr))throw Failure("Preview encoding failed");data.resize(std::size_t(n));return data;}
 static Raster preview(const Raster& orig,bool gray,double& mean){double ratio=std::min(1.,double(THUMB_MAX)/std::max(orig.w,orig.h));Raster out;out.w=std::max(1,int(std::lround(orig.w*ratio)));out.h=std::max(1,int(std::lround(orig.h*ratio)));out.rgba.resize(std::size_t(out.w)*out.h*4);double total=0;for(int y=0;y<out.h;y++){int sy=std::min(orig.h-1,int(double(y)*orig.h/out.h));for(int x=0;x<out.w;x++){int sx=std::min(orig.w-1,int(double(x)*orig.w/out.w));auto i=(std::size_t(sy)*orig.w+sx)*4,j=(std::size_t(y)*out.w+x)*4;const unsigned char* c=&orig.rgba[i];unsigned char lum=static_cast<unsigned char>(std::clamp(std::lround(.2126*c[0]+.7152*c[1]+.0722*c[2]),0L,255L));total+=lum;if(gray){out.rgba[j]=out.rgba[j+1]=out.rgba[j+2]=lum;}else{out.rgba[j]=c[0];out.rgba[j+1]=c[1];out.rgba[j+2]=c[2];}out.rgba[j+3]=255;}}mean=total/(out.w*out.h);return out;}
+struct PyramidLevel{std::uint64_t width=0,height=0;};
+static std::vector<PyramidLevel> pyramid_levels(std::uint64_t width,std::uint64_t height){
+ std::vector<PyramidLevel> result{{width,height}};
+ while(result.back().width>TILE_SIZE||result.back().height>TILE_SIZE)
+  result.push_back({std::max<std::uint64_t>(1,(result.back().width+1)/2),std::max<std::uint64_t>(1,(result.back().height+1)/2)});
+ return result;
+}
+static std::string pyramid_manifest_json(const std::string& id,std::uint64_t width,std::uint64_t height){
+ const auto levels=pyramid_levels(width,height);std::ostringstream out;
+ out<<"{\"schema\":\"rizoma.image-pyramid.v1\",\"image_id\":"<<q(id)<<",\"tile_size\":"<<TILE_SIZE<<",\"width\":"<<width<<",\"height\":"<<height<<",\"levels\":[";
+ bool first=true;for(std::size_t index=levels.size();index-->0;){if(!first)out<<',';first=false;const auto& level=levels[index];out<<"{\"level\":"<<index<<",\"width\":"<<level.width<<",\"height\":"<<level.height<<",\"columns\":"<<(level.width+TILE_SIZE-1)/TILE_SIZE<<",\"rows\":"<<(level.height+TILE_SIZE-1)/TILE_SIZE<<",\"url_template\":"<<q("/api/v1/images/"+id+"/tiles/"+std::to_string(index)+"/{x}/{y}.png")<<'}';}
+ return out<<"]}",out.str();
+}
+static std::optional<rizoma::tiles::Pyramid> build_pyramid(const App& app,const std::string& id,const fs::path& source){
+ const fs::path parent=app.root/"derived"/id,target=parent/"pyramid",complete=target/".complete";
+ if(fs::exists(complete))return std::nullopt;
+ static std::mutex pyramid_mutex;std::lock_guard lock(pyramid_mutex);
+ if(fs::exists(complete))return std::nullopt;
+ const fs::path temporary=parent/("pyramid-"+rand_id()+".tmp");
+ try{
+  const auto pyramid=rizoma::tiles::create(source,temporary,TILE_SIZE);
+  put(temporary/"manifest.json",pyramid_manifest_json(id,pyramid.width,pyramid.height));put(temporary/".complete",utc_offset(0));
+  if(fs::exists(target))fs::remove_all(target);
+  fs::rename(temporary,target);
+  return pyramid;
+ }catch(...){std::error_code ignored;fs::remove_all(temporary,ignored);throw;}
+}
 static std::string safe_filename(std::string s){auto pos=s.find_last_of("/\\");if(pos!=std::string::npos)s=s.substr(pos+1);std::string n;for(unsigned char c:s){if(c>=32&&c!=127&&c!='"'&&c!='<'&&c!='>'&&c!='\\')n+=char(c);}if(n.empty())n="imagem-sem-nome";if(n.size()>100)n.resize(100);return n;}
 static bool sample_ok(const std::string& s){return s.size()<=64&&std::all_of(s.begin(),s.end(),[](unsigned char c){return std::isalnum(c)||c=='_'||c=='-'||c=='.';});}
 static bool date_ok(const std::string& s){if(s.empty())return true;if(s.size()!=10)return false;for(int i=0;i<10;++i)if((i==4||i==7)?s[i]!='-':!std::isdigit(static_cast<unsigned char>(s[i])))return false;return s.substr(5,2)>="01"&&s.substr(5,2)<="12"&&s.substr(8,2)>="01"&&s.substr(8,2)<="31";}
@@ -238,7 +277,7 @@ static int nib(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c
 static std::string decode_uri(const std::string& s){std::string v;for(std::size_t i=0;i<s.size();++i){if(s[i]=='%'&&i+2<s.size()&&nib(s[i+1])>=0&&nib(s[i+2])>=0){v+=char((nib(s[i+1])<<4)|nib(s[i+2]));i+=2;}else if(s[i]=='+')v+=' ';else v+=s[i];}return v;}
 static std::map<std::string,std::string> params(const std::string& path){std::map<std::string,std::string> p;auto pos=path.find('?');if(pos==std::string::npos)return p;std::string tail=path.substr(pos+1);std::istringstream in(tail);std::string part;while(std::getline(in,part,'&')){auto eq=part.find('=');if(eq!=std::string::npos)p[decode_uri(part.substr(0,eq))]=decode_uri(part.substr(eq+1));}return p;}
 static std::string col(sqlite3_stmt* st,int i){auto p=reinterpret_cast<const char*>(sqlite3_column_text(st,i));return p?p:"";}
-static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int(st,7)<<",\"height\":"<<sqlite3_column_int(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"user_email\":"<<q(col(st,13))<<",\"user_id\":"<<q(col(st,14))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
+static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"<<q(col(st,0))<<",\"filename\":"<<q(col(st,1))<<",\"sample_id\":"<<q(col(st,2))<<",\"capture_date\":"<<q(col(st,3))<<",\"created_at\":"<<q(col(st,4))<<",\"sha256\":"<<q(col(st,5))<<",\"bytes\":"<<sqlite3_column_int64(st,6)<<",\"width\":"<<sqlite3_column_int64(st,7)<<",\"height\":"<<sqlite3_column_int64(st,8)<<",\"format\":"<<q(col(st,9))<<",\"brightness\":"<<std::fixed<<std::setprecision(1)<<sqlite3_column_double(st,10)<<",\"qc_state\":"<<q(col(st,11))<<",\"pipeline\":"<<q(col(st,12))<<",\"user_email\":"<<q(col(st,13))<<",\"user_id\":"<<q(col(st,14))<<",\"scientific_status\":\"NOT_ANALYZED\"}";return o.str();}
 constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,user_email,user_id";
 static std::string all_images(const App& app,const std::string& user_id){
  Db d(app.root/"rizoma.sqlite3");
@@ -276,12 +315,16 @@ static std::string manifest(const App& app,const std::string& user_id){
  return r;
 }
 static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime,const std::string& user_id){
- Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format FROM images WHERE id=? AND user_id=?");
+ Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format,width,height FROM images WHERE id=? AND user_id=?");
  st.bind(1,id);
  st.bind(2,user_id);
  if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
  std::string fmt=col(st.p,3);
  if(kind=="original-view"){
+  const auto width=sqlite3_column_int64(st.p,4),height=sqlite3_column_int64(st.p,5);
+  if(width<=0||height<=0||static_cast<std::uint64_t>(width)>MAX_PIXELS/static_cast<std::uint64_t>(height)){
+   mime="image/png";return slurp(app.root/col(st.p,1));
+  }
   if(fmt=="tiff"){
    fs::path view_path = app.root/("derived/"+id+"/original_view.png");
    if(!fs::exists(view_path)){
@@ -306,32 +349,64 @@ static std::string media(const App& app,const std::string& id,const std::string&
  }else mime="image/png";
  return slurp(app.root/stored);
 }
+struct AuthorizedImage{std::string original_path,format;std::uint64_t width=0,height=0;};
+static AuthorizedImage authorized_image(const App& app,const std::string& id,const std::string& user_id){
+ Db db(app.root/"rizoma.sqlite3");Stmt image(db.p,"SELECT original_path,format,width,height FROM images WHERE id=? AND user_id=?");image.bind(1,id);image.bind(2,user_id);
+ if(sqlite3_step(image.p)!=SQLITE_ROW)throw Failure("Image not found");
+ return {col(image.p,0),col(image.p,1),static_cast<std::uint64_t>(sqlite3_column_int64(image.p,2)),static_cast<std::uint64_t>(sqlite3_column_int64(image.p,3))};
+}
+static AuthorizedImage ensure_pyramid(const App& app,const std::string& id,const std::string& user_id){
+ auto image=authorized_image(app,id,user_id);
+ if(!fs::exists(app.root/"derived"/id/"pyramid"/".complete"))build_pyramid(app,id,app.root/image.original_path);
+ return image;
+}
+static std::string pyramid_manifest(const App& app,const std::string& id,const std::string& user_id){
+ const auto image=ensure_pyramid(app,id,user_id);return pyramid_manifest_json(id,image.width,image.height);
+}
+static bool nonnegative_integer(std::string_view text,std::uint64_t& value){
+ if(text.empty())return false;
+ value=0;const auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),value);return error==std::errc{}&&end==text.data()+text.size();
+}
+static std::string pyramid_tile(const App& app,const std::string& id,const std::string& resource,std::string& mime,const std::string& user_id){
+ const auto image=ensure_pyramid(app,id,user_id);const auto levels=pyramid_levels(image.width,image.height);
+ // resource is tiles/{level}/{x}/{y}.png; every component is parsed before a path is assembled.
+ std::vector<std::string> parts;std::istringstream stream(resource);std::string part;while(std::getline(stream,part,'/'))parts.push_back(part);
+ if(parts.size()!=4||parts[0]!="tiles"||!parts[3].ends_with(".png"))throw Failure("Tile not found");
+ parts[3].resize(parts[3].size()-4);std::uint64_t level=0,x=0,y=0;
+ if(!nonnegative_integer(parts[1],level)||!nonnegative_integer(parts[2],x)||!nonnegative_integer(parts[3],y)||level>=levels.size())throw Failure("Tile not found");
+ const auto& selected=levels[std::size_t(level)];
+ if(x>=(selected.width+TILE_SIZE-1)/TILE_SIZE||y>=(selected.height+TILE_SIZE-1)/TILE_SIZE)throw Failure("Tile not found");
+ mime="image/png";return slurp(app.root/"derived"/id/"pyramid"/("L"+std::to_string(level))/(std::to_string(x)+"_"+std::to_string(y)+".png"));
+}
 struct Ingested{std::string id;std::string json;};
-static Ingested ingest(const App& app,const std::string& bytes,const std::string& filename,const std::string& sample,const std::string& captured,const std::string& user_id,const std::string& user_email){
- if(bytes.empty()||bytes.size()>MAX_UPLOAD)throw Failure("Image must contain data and be at most 12 MiB");
+static Ingested ingest_file(const App& app,const fs::path& staged,const std::string& filename,const std::string& sample,const std::string& captured,const std::string& user_id,const std::string& user_email){
  if(!sample_ok(sample)||!date_ok(captured))throw Failure("Invalid sample identifier or capture date");
- auto fmt=detect_format(bytes);auto raster=decode(bytes,fmt);auto hash=hash256(bytes);
+ std::error_code size_error;const auto bytes=fs::file_size(staged,size_error);if(size_error||bytes==0)throw Failure("Image must contain data");
+ std::ifstream header(staged,std::ios::binary);std::string signature(8,'\0');header.read(signature.data(),signature.size());signature.resize(static_cast<std::size_t>(header.gcount()));
+ const auto fmt=detect_format(signature),hash=hash256_file(staged);
  Db db(app.root/"rizoma.sqlite3");{
   Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=? AND user_id=?");
   lookup.bind(1,hash);
   lookup.bind(2,user_id);
   if(sqlite3_step(lookup.p)==SQLITE_ROW)throw Failure("An identical original is already registered in your collection (SHA-256 duplicate)");
  }
- double brightness=0,unused=0;auto thumb=preview(raster,false,brightness);auto gray=preview(raster,true,unused);
- auto thumbbytes=png_encode(thumb),graybytes=png_encode(gray);
  const std::string id=rand_id();const std::string ext=fmt=="png"?"png":fmt=="jpeg"?"jpg":"tif";
+ struct DerivedGuard {fs::path path;bool keep=false;~DerivedGuard(){if(!keep){std::error_code ignored;fs::remove_all(path,ignored);}}} derived_guard{app.root/"derived"/id};
  const std::string orig=std::string("blobs/")+hash.substr(0,2)+"/"+hash+"."+ext;
  const std::string a="derived/"+id+"/preview.png",b="derived/"+id+"/grayscale.png";
- const fs::path stage=app.root/"staging"/(id+".tmp");put(stage,bytes);fs::create_directories((app.root/orig).parent_path());if(!fs::exists(app.root/orig))fs::rename(stage,app.root/orig);else fs::remove(stage);
- put(app.root/a,thumbbytes);put(app.root/b,graybytes);
- if(fmt=="tiff")put(app.root/("derived/"+id+"/original_view.png"), png_encode(raster));
+ const auto created=build_pyramid(app,id,staged);if(!created)throw Failure("Pyramid publication conflict");const auto& pyramid=*created;
+ if(pyramid.source_sha256!=hash)throw Failure("Source changed while preparing pyramid");
+ const auto top_level=pyramid.levels.size()-1;const auto thumbbytes=slurp(app.root/"derived"/id/"pyramid"/("L"+std::to_string(top_level))/"0_0.png");
+ auto thumbnail=png_decode(thumbbytes);double brightness=0,unused=0;auto color=preview(thumbnail,false,brightness);auto gray=preview(thumbnail,true,unused);
+ put(app.root/a,png_encode(color));put(app.root/b,png_encode(gray));
+ fs::create_directories((app.root/orig).parent_path());if(!fs::exists(app.root/orig))fs::rename(staged,app.root/orig);else fs::remove(staged);
  const std::string state=brightness<35?"LOW_LIGHT":brightness>220?"HIGH_LIGHT":"REVIEW";
  sql(db.p,"BEGIN IMMEDIATE");try{
  Stmt st(db.p,"INSERT INTO images(id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,original_path,preview_path,grayscale_path,user_email,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
- st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc_offset(0));st.bind(6,hash);sqlite3_bind_int64(st.p,7,sqlite3_int64(bytes.size()));sqlite3_bind_int(st.p,8,raster.w);sqlite3_bind_int(st.p,9,raster.h);st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);st.bind(17,user_email);st.bind(18,user_id);
+ st.bind(1,id);st.bind(2,safe_filename(filename));st.bind(3,sample);st.bind(4,captured);st.bind(5,utc_offset(0));st.bind(6,hash);sqlite3_bind_int64(st.p,7,static_cast<sqlite3_int64>(bytes));sqlite3_bind_int64(st.p,8,static_cast<sqlite3_int64>(pyramid.width));sqlite3_bind_int64(st.p,9,static_cast<sqlite3_int64>(pyramid.height));st.bind(10,fmt);sqlite3_bind_double(st.p,11,brightness);st.bind(12,state);st.bind(13,PIPELINE);st.bind(14,orig);st.bind(15,a);st.bind(16,b);st.bind(17,user_email);st.bind(18,user_id);
  if(sqlite3_step(st.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
- Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED',?,?)");ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,hash+" | "+user_id+" | "+user_email);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
- return {id,one_image(app,id,user_id)};
+ Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_RECEIVED_PROGRESSIVE',?,?)");ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,hash+" | "+user_id+" | "+user_email);if(sqlite3_step(ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));sql(db.p,"COMMIT");}catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+ derived_guard.keep=true;return {id,one_image(app,id,user_id)};
 }
 constexpr const char* ANALYSIS_ALGORITHM="rizoma-exp-002-003-integrated-baseline";
 constexpr const char* ANALYSIS_VERSION="0.1.0-experimental";
@@ -383,6 +458,9 @@ static std::string start_analysis(const App& app,const std::string& image_id,con
  Stmt image(db.p,"SELECT original_path,format,sha256,width,height FROM images WHERE id=? AND user_id=?");image.bind(1,image_id);image.bind(2,user_id);
  if(sqlite3_step(image.p)!=SQLITE_ROW)throw Failure("Image not found");
  const std::string path=col(image.p,0),format=col(image.p,1),source_sha=col(image.p,2);
+ const auto width=sqlite3_column_int64(image.p,3),height=sqlite3_column_int64(image.p,4);
+ if(width<=0||height<=0||static_cast<std::uint64_t>(width)>MAX_PIXELS/static_cast<std::uint64_t>(height))
+  throw Failure("Analysis remains limited to 12 megapixels; EXP-004 large-image analysis is not implemented");
  auto raster=decode(slurp(app.root/path),format);
  auto result=rizoma::analysis::detect(static_cast<std::uint64_t>(raster.w),static_cast<std::uint64_t>(raster.h),raster.rgba);
  const std::string run_id=rand_id(),now=utc_offset(0);
@@ -599,13 +677,6 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   }
   if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app,user->id));
   if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app,user->id),"text/csv; charset=utf-8");
-  if(req.method()==http::verb::post&&p=="/api/v1/images"){
-   if(req.find("X-Rizoma-Client")==req.end()||req["X-Rizoma-Client"]!="web-v0.2.0")return problem(v,http::status::forbidden,"Client header required");
-   if(req[http::field::content_type]!="application/octet-stream")return problem(v,http::status::unsupported_media_type,"Use application/octet-stream");
-   if(req.body().size()>MAX_UPLOAD)return problem(v,http::status::payload_too_large,"File exceeds upload limit");
-   try{auto ret=ingest(app,req.body(),args["filename"],args["sample_id"],args["capture_date"],user->id,user->email);return respond(http::status::created,v,ret.json);}
-   catch(const Failure& e){std::string m=e.what();http::status st=m.find("already registered")!=std::string::npos?http::status::conflict:m.find("Only PNG")!=std::string::npos?http::status::unsupported_media_type:m.find("exceeds")!=std::string::npos?http::status::payload_too_large:http::status::unprocessable_entity;return problem(v,st,m);}
-  }
   if(p.starts_with("/api/v1/analysis-regions/")){
    std::string rem=p.substr(std::string("/api/v1/analysis-regions/").size());auto slash=rem.find('/');auto region_id=rem.substr(0,slash);
    if(!valid_id(region_id)||slash==std::string::npos||rem.substr(slash+1)!="reviews")return problem(v,http::status::bad_request,"Invalid review resource");
@@ -624,7 +695,7 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   }
   if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
    std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
+   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));if(kind=="pyramid")return respond(http::status::ok,v,pyramid_manifest(app,id,user->id));if(kind.starts_with("tiles/")){std::string mime;auto tile=pyramid_tile(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(tile),mime);}if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
    std::string mime;std::string binary=media(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(binary),mime);
    }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
   }
@@ -633,22 +704,67 @@ static Response handle(const App& app,const http::request<http::string_body>& re
  if(req.method()==http::verb::get){const std::map<std::string,std::pair<std::string,std::string>> assets={{"/",{"index.html","text/html; charset=utf-8"}},{"/index.html",{"index.html","text/html; charset=utf-8"}},{"/style.css",{"style.css","text/css; charset=utf-8"}},{"/app.js",{"app.js","application/javascript; charset=utf-8"}}};auto it=assets.find(p);if(it!=assets.end())try{return respond(http::status::ok,v,slurp(app.web/it->second.first),it->second.second);}catch(...){return problem(v,http::status::internal_server_error,"Frontend unavailable");}}
  return problem(v,http::status::not_found,"Resource not found");
 }
+static http::request<http::string_body> request_header(const http::request<http::buffer_body>& source){
+ http::request<http::string_body> target{source.method(),source.target(),source.version()};
+ for(const auto& field:source)target.set(field.name_string(),field.value());
+ return target;
+}
+static bool allowed_origin(const App& app,const http::request<http::string_body>& request){
+ const std::string origin=std::string(request[http::field::origin]),host=std::string(request[http::field::host]);
+ return origin.empty()||origin=="http://"+host||origin=="http://localhost:"+std::to_string(app.port)||origin=="http://127.0.0.1:"+std::to_string(app.port)||(!app.host.empty()&&origin=="http://"+app.host+":"+std::to_string(app.port));
+}
+static http::status ingest_status(std::string_view message){
+ if(message.find("already registered")!=std::string_view::npos)return http::status::conflict;
+ if(message.find("Formato")!=std::string_view::npos||message.find("Only PNG")!=std::string_view::npos)return http::status::unsupported_media_type;
+ if(message.find("8 GiB")!=std::string_view::npos)return http::status::payload_too_large;
+ return http::status::unprocessable_entity;
+}
 static void session(tcp::socket socket,App& app){
  struct ActiveGuard {App& app;~ActiveGuard(){--app.active;}} active_guard{app};
  try{
- beast::tcp_stream stream(std::move(socket));stream.expires_after(std::chrono::seconds(30));beast::flat_buffer buffer;http::request_parser<http::string_body> parser;parser.body_limit(MAX_UPLOAD+8192);beast::error_code ec;http::read(stream,buffer,parser,ec);
- if(ec){if(ec==http::error::body_limit){auto r=problem(11,http::status::payload_too_large,"Maximum payload: 12 MiB");http::write(stream,r,ec);}return;}
- auto req=parser.release();Response r=problem(req.version(),http::status::internal_server_error,"Server error");
- // This first operational slice is bound exclusively to loopback; external authentication is NOT implemented.
- const std::string origin=std::string(req[http::field::origin]);
- const std::string host_hdr=std::string(req[http::field::host]);
- bool origin_ok = origin.empty() ||
-                  origin == "http://" + host_hdr ||
-                  origin == "http://localhost:" + std::to_string(app.port) ||
-                  origin == "http://127.0.0.1:" + std::to_string(app.port) ||
-                  (!app.host.empty() && origin == "http://" + app.host + ":" + std::to_string(app.port));
- if(!origin_ok)r=problem(req.version(),http::status::forbidden,"Cross-origin requests are disabled");
- else try{r=handle(app,req);}catch(const std::exception& e){std::cerr<<"Request error: "<<e.what()<<"\n";r=problem(req.version(),http::status::internal_server_error,"Unexpected server error");}
+ beast::tcp_stream stream(std::move(socket));stream.expires_after(std::chrono::minutes(5));beast::flat_buffer buffer;http::request_parser<http::buffer_body> parser;parser.header_limit(16*1024);parser.body_limit(MAX_UPLOAD);beast::error_code ec;http::read_header(stream,buffer,parser,ec);
+ if(ec)return;
+ auto req=request_header(parser.get());Response r=problem(req.version(),http::status::internal_server_error,"Server error");
+ const std::string target(req.target());const std::string path=target.substr(0,target.find('?'));
+ const bool upload=req.method()==http::verb::post&&path=="/api/v1/images";
+ if(!allowed_origin(app,req))r=problem(req.version(),http::status::forbidden,"Cross-origin requests are disabled");
+ else if(upload){
+  const auto user=authenticate(app,req);
+  if(!user)r=problem(req.version(),http::status::unauthorized,"Autenticação necessária. Acesse com seu e-mail institucional @embrapa.br.");
+  else if(req.find("X-Rizoma-Client")==req.end()||req["X-Rizoma-Client"]!="web-v0.2.0")r=problem(req.version(),http::status::forbidden,"Client header required");
+  else if(req[http::field::content_type]!="application/octet-stream")r=problem(req.version(),http::status::unsupported_media_type,"Use application/octet-stream");
+  else{
+   const fs::path staged=app.root/"staging"/("upload-"+rand_id()+".tmp");
+   struct StageGuard {fs::path path;~StageGuard(){std::error_code ignored;fs::remove(path,ignored);}} guard{staged};
+   try{
+    fs::create_directories(staged.parent_path());std::ofstream output(staged,std::ios::binary|std::ios::trunc);if(!output)throw Failure("Could not create upload staging file");
+    std::array<char,64*1024> chunk{};std::uint64_t total=0;
+    while(!parser.is_done()){
+     parser.get().body().data=chunk.data();parser.get().body().size=chunk.size();http::read_some(stream,buffer,parser,ec);
+     const auto count=chunk.size()-parser.get().body().size;
+     if(count){total+=count;if(total>MAX_UPLOAD)throw Failure("File exceeds 8 GiB upload limit");output.write(chunk.data(),static_cast<std::streamsize>(count));if(!output)throw Failure("Disk write failed during upload");}
+     if(ec==http::error::need_buffer)ec={};
+     if(ec)throw Failure("Interrupted image upload");
+    }
+    output.close();if(!output)throw Failure("Could not finish staged upload");::chmod(staged.c_str(),0600);
+    auto arguments=params(target);const auto ingested=ingest_file(app,staged,arguments["filename"],arguments["sample_id"],arguments["capture_date"],user->id,user->email);
+    r=respond(http::status::created,req.version(),ingested.json);
+   }catch(const Failure& error){r=problem(req.version(),ingest_status(error.what()),error.what());}
+   catch(const std::exception& error){std::cerr<<"Progressive ingest error: "<<error.what()<<"\n";r=problem(req.version(),http::status::unprocessable_entity,error.what());}
+  }
+ }else{
+  try{
+   std::string body;std::array<char,16*1024> chunk{};
+   while(!parser.is_done()){
+    parser.get().body().data=chunk.data();parser.get().body().size=chunk.size();http::read_some(stream,buffer,parser,ec);
+    const auto count=chunk.size()-parser.get().body().size;if(body.size()+count>MAX_CONTROL_BODY)throw Failure("Request body exceeds 1 MiB");body.append(chunk.data(),count);
+    if(ec==http::error::need_buffer)ec={};
+    if(ec)throw Failure("Interrupted request body");
+   }
+   req.body()=std::move(body);r=handle(app,req);
+  }catch(const Failure& error){r=problem(req.version(),http::status::payload_too_large,error.what());}
+  catch(const std::exception& e){std::cerr<<"Request error: "<<e.what()<<"\n";r=problem(req.version(),http::status::internal_server_error,"Unexpected server error");}
+ }
  http::write(stream,r,ec);stream.socket().shutdown(tcp::socket::shutdown_both,ec);
  }catch(const std::exception& e){std::cerr<<"Connection error: "<<e.what()<<"\n";}
 }
