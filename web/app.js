@@ -414,7 +414,12 @@ function renderAnalysis(){
 
 function reviewEditor(region){
   const label = region.review?.label || region.suggestion;
-  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3><p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion))}</strong>. Concordância é evidência técnica, não confiança científica.</p><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
+  const jev = region.judgment_evidence || {};
+  const learning = jev.learning || {};
+  const conf = jev.confidence ? Math.round(jev.confidence * 100) : null;
+  const strat = learning.strategy || 'BASELINE';
+  const badge = conf !== null ? `<div class="learning-badge ${learning.uncertainty ? 'uncertain' : ''}">Estratégia: ${h(strat)} · Confiança estimada: ${conf}% ${learning.uncertainty ? '⚠️ Alta Incerteza (Prioridade de Revisão)' : ''}</div>` : '';
+  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3>${badge}<p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion))}</strong>. Concordância é evidência técnica, não confiança científica.</p><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
 }
 
 async function loadHistory(regionId){
@@ -428,11 +433,12 @@ async function loadHistory(regionId){
 async function startAnalysis(){
   if(!current) return;
   const button = $('start-analysis'); button.disabled = true; button.textContent = 'Analisando…';
+  const strategy = $('analysis-strategy')?.value || 'BAYESIAN_CALIBRATED';
   try{
-    const result = await api(`/api/v1/images/${current.id}/analysis`, {method:'POST'});
+    const result = await api(`/api/v1/images/${current.id}/analysis?algorithm=${encodeURIComponent(strategy)}`, {method:'POST'});
     currentAnalysis = result.data; const runs=await api(`/api/v1/images/${current.id}/analysis-runs`);analysisRuns=runs.data||[];selectedRegion = currentAnalysis.regions?.[0] || null; renderAnalysis();
     if(selectedRegion) loadHistory(selectedRegion.id);
-    fillInspect(); toast(`${currentAnalysis.regions.length} região(ões) candidata(s) registrada(s).`);
+    fillInspect(); toast(`${currentAnalysis.regions.length} região(ões) registrada(s) via ${strategy}.`);
   }catch(err){ toast(err.message); }
   finally{ button.disabled = false; button.textContent = 'Executar nova análise'; }
 }

@@ -318,6 +318,20 @@ def main():
             status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={first_run_id}',headers=auth_headers)
             assert status==200 and json.loads(body)['data']['regions'][0]['version']==3,(status,body)
 
+            # Test the 3 learning levels (Bayesian, Tabular SGD, and Visual k-NN)
+            for strat in ['BAYESIAN_CALIBRATED', 'TABULAR_INCREMENTAL', 'VISUAL_KNN']:
+                status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?algorithm={strat}','POST',b'',auth_headers)
+                assert status==201,(status,body)
+                run_data = json.loads(body)['data']
+                assert run_data['algorithm']==strat, run_data
+                assert run_data['algorithm_version']=='learning-v1.0', run_data
+                assert run_data['regions'][0]['judgment_evidence']['learning']['strategy']==strat, run_data
+
+            db=sqlite3.connect(Path(temp)/'rizoma.sqlite3')
+            assert db.execute("SELECT COUNT(*) FROM learning_models").fetchone()[0]>=1
+            assert db.execute("SELECT COUNT(*) FROM learning_exemplars").fetchone()[0]>=1
+            db.close()
+
             # EXP-004 gate: acquisition and review exceed the former 12 MP ceiling.
             large = progressive_png()
             large_upload = base+'/api/v1/images?filename=campo-progressivo-7001.png&sample_id=EXP-004-GATE'

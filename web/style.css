@@ -79,3 +79,8 @@
 .auth-feedback.error{background:#fff0ed;color:#a52a1a;border:1px solid #f6cfc7}
 .auth-feedback.success{background:#eaf8f4;color:#106b57;border:1px solid #bfe8dd}
 .auth-foot{background:#f6f9fc;border-top:1px solid var(--line);padding:12px 32px;display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted)}
+.analysis-action-wrap{display:flex;align-items:center;gap:8px}
+.select-strategy{padding:7px 10px;border-radius:6px;border:1px solid var(--line);background:#fff;font-size:.78rem;font-weight:600;color:var(--text)}
+.learning-badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:.70rem;font-weight:700;background:#edf5fd;color:#0b4c8c;border:1px solid #c9e1fa;margin-bottom:6px}
+.learning-badge.uncertain{background:#fff7e6;color:#874d00;border-color:#ffe58f}
+

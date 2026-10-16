@@ -33,7 +33,7 @@ find_package(JPEG REQUIRED)
 find_package(TIFF REQUIRED)
 find_path(BOOST_INCLUDE_DIR NAMES boost/asio.hpp REQUIRED)
 
-add_executable(rizoma-server src/main.cpp src/database.cpp src/analysis.cpp src/tiles.cpp)
+add_executable(rizoma-server src/main.cpp src/database.cpp src/analysis.cpp src/tiles.cpp src/learning.cpp)
 target_include_directories(rizoma-server PRIVATE ${BOOST_INCLUDE_DIR})
 target_link_libraries(rizoma-server PRIVATE Threads::Threads OpenSSL::Crypto SQLite3::SQLite3 PNG::PNG JPEG::JPEG TIFF::TIFF)
 target_compile_definitions(rizoma-server PRIVATE BOOST_ERROR_CODE_HEADER_ONLY BOOST_SYSTEM_NO_DEPRECATED)

@@ -26,6 +26,7 @@
 #include "database.hpp"
 #include "analysis.hpp"
 #include "tiles.hpp"
+#include "learning.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -426,18 +427,20 @@ static std::string analysis_json(const App& app,const std::string& image_id,cons
     <<",\"parameters\":"<<col(run.p,3)<<",\"source_sha256\":"<<q(col(run.p,4))<<",\"status\":"<<q(col(run.p,5))
     <<",\"created_at\":"<<q(col(run.p,6))<<",\"completed_at\":"<<q(col(run.p,7))<<",\"regions\":[";
  Stmt regions(db.p,R"SQL(SELECT r.id,r.ordinal,r.x,r.y,r.width,r.height,r.area,r.evidence_json,r.current_version,
-  j.label,COALESCE(e.action,''),COALESCE(e.label,''),COALESCE(e.justification,''),COALESCE(e.created_at,'')
+  j.label,COALESCE(e.action,''),COALESCE(e.label,''),COALESCE(e.justification,''),COALESCE(e.created_at,''),j.evidence_json
  FROM analysis_regions r JOIN analysis_judgments j ON j.region_id=r.id AND j.actor_type='ALGORITHM'
  LEFT JOIN review_events e ON e.region_id=r.id AND e.version=r.current_version
  WHERE r.run_id=? ORDER BY r.ordinal)SQL");regions.bind(1,run_id);bool first=true;
  while(sqlite3_step(regions.p)==SQLITE_ROW){
   if(!first)out<<',';
   first=false;
+  const std::string jev=col(regions.p,14);
   out<<"{\"id\":"<<q(col(regions.p,0))<<",\"ordinal\":"<<sqlite3_column_int(regions.p,1)
      <<",\"x\":"<<sqlite3_column_int64(regions.p,2)<<",\"y\":"<<sqlite3_column_int64(regions.p,3)
      <<",\"width\":"<<sqlite3_column_int64(regions.p,4)<<",\"height\":"<<sqlite3_column_int64(regions.p,5)
      <<",\"area\":"<<sqlite3_column_int64(regions.p,6)<<",\"evidence\":"<<col(regions.p,7)
-     <<",\"version\":"<<sqlite3_column_int(regions.p,8)<<",\"suggestion\":"<<q(col(regions.p,9))<<",\"review\":";
+     <<",\"version\":"<<sqlite3_column_int(regions.p,8)<<",\"suggestion\":"<<q(col(regions.p,9))
+     <<",\"judgment_evidence\":"<<(jev.empty()?"{}":jev)<<",\"review\":";
   if(col(regions.p,10).empty())out<<"null";else out<<"{\"action\":"<<q(col(regions.p,10))<<",\"label\":"<<q(col(regions.p,11))<<",\"justification\":"<<q(col(regions.p,12))<<",\"created_at\":"<<q(col(regions.p,13))<<"}";
   out<<'}';
  }
@@ -453,7 +456,7 @@ static std::string analysis_runs_json(const App& app,const std::string& image_id
  std::string out="{\"data\":[";bool first=true;while(sqlite3_step(runs.p)==SQLITE_ROW){if(!first)out+=',';first=false;out+="{\"id\":"+q(col(runs.p,0))+",\"algorithm_version\":"+q(col(runs.p,1))+",\"status\":"+q(col(runs.p,2))+",\"created_at\":"+q(col(runs.p,3))+",\"completed_at\":"+q(col(runs.p,4))+",\"region_count\":"+std::to_string(sqlite3_column_int64(runs.p,5))+"}";}return out+"]}";
 }
 
-static std::string start_analysis(const App& app,const std::string& image_id,const std::string& user_id){
+static std::string start_analysis(const App& app,const std::string& image_id,const std::string& user_id,const std::string& algo_req=""){
  Db db(app.root/"rizoma.sqlite3");
  Stmt image(db.p,"SELECT original_path,format,sha256,width,height FROM images WHERE id=? AND user_id=?");image.bind(1,image_id);image.bind(2,user_id);
  if(sqlite3_step(image.p)!=SQLITE_ROW)throw Failure("Image not found");
@@ -464,9 +467,13 @@ static std::string start_analysis(const App& app,const std::string& image_id,con
  auto raster=decode(slurp(app.root/path),format);
  auto result=rizoma::analysis::detect(static_cast<std::uint64_t>(raster.w),static_cast<std::uint64_t>(raster.h),raster.rgba);
  const std::string run_id=rand_id(),now=utc_offset(0);
+ const auto strategy=rizoma::learning::parse_strategy(algo_req);
+ const std::string algo_name=rizoma::learning::strategy_name(strategy);
+ const std::string algo_version=strategy==rizoma::learning::Strategy::BASELINE_HEURISTIC?ANALYSIS_VERSION:"learning-v1.0";
+ const std::string algo_params="{\"strategy\":"+q(algo_name)+",\"tile_size\":32}";
  sql(db.p,"BEGIN IMMEDIATE");try{
   Stmt insert_run(db.p,"INSERT INTO analysis_runs(id,image_id,requested_by_user_id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at,error) VALUES(?,?,?,?,?,?,?,'REVIEW_REQUIRED',?,?,NULL)");
-  insert_run.bind(1,run_id);insert_run.bind(2,image_id);insert_run.bind(3,user_id);insert_run.bind(4,ANALYSIS_ALGORITHM);insert_run.bind(5,ANALYSIS_VERSION);insert_run.bind(6,ANALYSIS_PARAMS);insert_run.bind(7,source_sha);insert_run.bind(8,now);insert_run.bind(9,now);
+  insert_run.bind(1,run_id);insert_run.bind(2,image_id);insert_run.bind(3,user_id);insert_run.bind(4,algo_name);insert_run.bind(5,algo_version);insert_run.bind(6,algo_params);insert_run.bind(7,source_sha);insert_run.bind(8,now);insert_run.bind(9,now);
   if(sqlite3_step(insert_run.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
   int ordinal=0;for(const auto& region:result.regions){
    const std::string region_id=rand_id(),judgment_id=rand_id();++ordinal;
@@ -474,8 +481,24 @@ static std::string start_analysis(const App& app,const std::string& image_id,con
    Stmt insert_region(db.p,"INSERT INTO analysis_regions(id,run_id,ordinal,x,y,width,height,area,evidence_json,current_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,0,?)");
    insert_region.bind(1,region_id);insert_region.bind(2,run_id);sqlite3_bind_int(insert_region.p,3,ordinal);sqlite3_bind_int64(insert_region.p,4,sqlite3_int64(region.x));sqlite3_bind_int64(insert_region.p,5,sqlite3_int64(region.y));sqlite3_bind_int64(insert_region.p,6,sqlite3_int64(region.width));sqlite3_bind_int64(insert_region.p,7,sqlite3_int64(region.height));sqlite3_bind_int64(insert_region.p,8,sqlite3_int64(region.area));insert_region.bind(9,evidence.str());insert_region.bind(10,now);
    if(sqlite3_step(insert_region.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
-   const std::string suggestion=region.shared_pixels>0?"ROOT":"UNKNOWN";
-   Stmt judgment(db.p,"INSERT INTO analysis_judgments(id,region_id,actor_type,label,evidence_json,created_at) VALUES(?,?,'ALGORITHM',?,?,?)");judgment.bind(1,judgment_id);judgment.bind(2,region_id);judgment.bind(3,suggestion);judgment.bind(4,evidence.str());judgment.bind(5,now);
+
+   rizoma::learning::JudgmentSuggestion suggestion;
+   if(strategy==rizoma::learning::Strategy::BAYESIAN_CALIBRATED){
+    suggestion=rizoma::learning::infer_bayesian(db.p,user_id,region,result.global_mean,result.global_stddev);
+   }else if(strategy==rizoma::learning::Strategy::TABULAR_INCREMENTAL){
+    auto feat=rizoma::learning::extract_features(region,raster.w,raster.h);
+    suggestion=rizoma::learning::infer_tabular(db.p,user_id,feat);
+   }else if(strategy==rizoma::learning::Strategy::VISUAL_KNN){
+    auto desc=rizoma::learning::extract_descriptor(raster.rgba,raster.w,raster.h,region);
+    suggestion=rizoma::learning::infer_visual_knn(db.p,user_id,desc);
+   }else{
+    suggestion.label=region.shared_pixels>0?"ROOT":"UNKNOWN";
+    suggestion.confidence=region.shared_pixels>0?0.75:0.60;
+    suggestion.details_json="{\"strategy\":\"BASELINE_HEURISTIC\"}";
+   }
+
+   std::string combined_evidence="{\"evidence\":"+evidence.str()+",\"learning\":"+suggestion.details_json+",\"confidence\":"+std::to_string(suggestion.confidence)+"}";
+   Stmt judgment(db.p,"INSERT INTO analysis_judgments(id,region_id,actor_type,label,evidence_json,created_at) VALUES(?,?,'ALGORITHM',?,?,?)");judgment.bind(1,judgment_id);judgment.bind(2,region_id);judgment.bind(3,suggestion.label);judgment.bind(4,combined_evidence);judgment.bind(5,now);
    if(sqlite3_step(judgment.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
   }
   sql(db.p,"COMMIT");
@@ -501,7 +524,7 @@ static std::string add_review(const App& app,const std::string& region_id,const 
  if(!actions.contains(action)||!labels.contains(label)||expected<0||justification.size()>1000)throw Failure("Invalid review");
  if(action=="SUSPEND"&&label!="UNKNOWN")throw Failure("Suspended reviews must use UNKNOWN");
  Db db(app.root/"rizoma.sqlite3");sql(db.p,"BEGIN IMMEDIATE");try{
-  Stmt region(db.p,R"SQL(SELECT r.current_version,a.image_id,COALESCE(e.label,j.label)
+  Stmt region(db.p,R"SQL(SELECT r.current_version,a.image_id,COALESCE(e.label,j.label),r.x,r.y,r.width,r.height,r.area,r.evidence_json,i.original_path,i.format,i.width,i.height
    FROM analysis_regions r JOIN analysis_runs a ON a.id=r.run_id JOIN images i ON i.id=a.image_id
    JOIN analysis_judgments j ON j.region_id=r.id AND j.actor_type='ALGORITHM'
    LEFT JOIN review_events e ON e.region_id=r.id AND e.version=r.current_version
@@ -510,11 +533,31 @@ static std::string add_review(const App& app,const std::string& region_id,const 
   const int current_version=sqlite3_column_int(region.p,0);
   if(current_version!=expected)throw Failure("Review conflict");
   if(action=="CONFIRM"&&label!=col(region.p,2))throw Failure("Confirmation label does not match the current interpretation");
+
+  const std::uint64_t reg_x=sqlite3_column_int64(region.p,3),reg_y=sqlite3_column_int64(region.p,4);
+  const std::uint64_t reg_w=sqlite3_column_int64(region.p,5),reg_h=sqlite3_column_int64(region.p,6);
+  const std::uint64_t reg_area=sqlite3_column_int64(region.p,7);
+  const std::string orig_path=col(region.p,9),orig_fmt=col(region.p,10);
+  const auto img_w=sqlite3_column_int64(region.p,11),img_h=sqlite3_column_int64(region.p,12);
+
   const int next=current_version+1;const std::string event_id=rand_id(),now=utc_offset(0);
   Stmt event(db.p,"INSERT INTO review_events(id,region_id,reviewer_user_id,version,action,label,justification,created_at) VALUES(?,?,?,?,?,?,?,?)");event.bind(1,event_id);event.bind(2,region_id);event.bind(3,user_id);sqlite3_bind_int(event.p,4,next);event.bind(5,action);event.bind(6,label);event.bind(7,justification);event.bind(8,now);
   if(sqlite3_step(event.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
   Stmt update(db.p,"UPDATE analysis_regions SET current_version=? WHERE id=? AND current_version=?");sqlite3_bind_int(update.p,1,next);update.bind(2,region_id);sqlite3_bind_int(update.p,3,current_version);
   if(sqlite3_step(update.p)!=SQLITE_DONE||sqlite3_changes(db.p)!=1)throw Failure("Review conflict");
+
+  if(action=="CONFIRM"||action=="CORRECT"){
+   const bool is_root=(label=="ROOT");
+   rizoma::analysis::Region r_obj{reg_x,reg_y,reg_w,reg_h,reg_area,0,0,0,false};
+   auto feat=rizoma::learning::extract_features(r_obj,img_w,img_h);
+   rizoma::learning::train_tabular_step(db.p,user_id,feat,is_root);
+   try{
+    auto raster=decode(slurp(app.root/orig_path),orig_fmt);
+    auto desc=rizoma::learning::extract_descriptor(raster.rgba,img_w,img_h,r_obj);
+    rizoma::learning::record_visual_exemplar(db.p,user_id,desc,label);
+   }catch(...){}
+  }
+
   sql(db.p,"COMMIT");
  }catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
  return review_history(app,region_id,user_id);
@@ -691,7 +734,8 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   if(req.method()==http::verb::post&&p.starts_with("/api/v1/images/")&&p.ends_with("/analysis")){
    const auto id=p.substr(std::string("/api/v1/images/").size(),p.size()-std::string("/api/v1/images/").size()-std::string("/analysis").size());
    if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   try{return respond(http::status::created,v,start_analysis(app,id,user->id));}catch(const Failure& e){return problem(v,std::string(e.what())=="Image not found"?http::status::not_found:http::status::unprocessable_entity,e.what());}
+   std::string algo=args.contains("algorithm")?args["algorithm"]:(req.body().empty()?"":json_extract_string(req.body(),"algorithm"));
+   try{return respond(http::status::created,v,start_analysis(app,id,user->id,algo));}catch(const Failure& e){return problem(v,std::string(e.what())=="Image not found"?http::status::not_found:http::status::unprocessable_entity,e.what());}
   }
   if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
    std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");

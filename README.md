@@ -19,9 +19,12 @@ Aplicação autônoma, inspirada na linguagem visual do **TRAMA** e **TRAMA-RS**
 - Arquivos originais em armazenamento privado endereçado por hash; original nunca sobrescrito pela interface. SHA-256 é identificador do conteúdo, não comprovação de autoria ou garantia de retenção.
 - Prévia redimensionada, derivado em tons de cinza e mosaicos da pirâmide gerados separadamente do original. São arquivos exclusivamente de **inspeção e navegação**, preservando sempre as coordenadas e bytes do original imutável.
 - Sinalização operacional de brilho médio da prévia: `REVIEW`, `LOW_LIGHT` e `HIGH_LIGHT`. O baseline experimental pode sugerir regiões `ROOT`/`UNKNOWN` para revisão; não há classificação radicular nem teste automatizado validado cientificamente.
-- SQLite com WAL, registro de evento de ingestão, consultas, filtros, inspeção visual profunda e exportação de manifesto CSV.
-- Fluxo experimental integrado de regiões candidatas, sugestão `ROOT`/`UNKNOWN` e revisão humana persistente (`ROOT`, `MATRIX`, `ARTIFACT`, `UNKNOWN`) com histórico append-only. A segmentação algorítmica permanece intencionalmente delimitada ao teto experimental de 12 MP até que a análise por blocos com reconciliação de halos seja homologada.
-- Testes automatizados de HTTP, isolamento de usuários, pirâmide multirresolução (comprovada em fixture de 49 MP), persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
+- Fluxo experimental integrado com **aprendizado a partir de feedback humano (3 níveis alternativos)** e histórico append-only (`ROOT`, `MATRIX`, `ARTIFACT`, `UNKNOWN`):
+  - **Nível 1 (`BAYESIAN_CALIBRATED`):** ajuste empírico dinâmico de limiares e estimativa de probabilidade a posteriori a partir das confirmações históricas.
+  - **Nível 2 (`TABULAR_INCREMENTAL`):** classificador logístico com descida de gradiente estocástica (SGD online) sobre atributos morfológicos e radiométricos.
+  - **Nível 3 (`VISUAL_KNN`):** similaridade visual por $k$-vizinhos mais próximos ($k$-NN) sobre descritores de patch com amostragem por incerteza (*Active Learning*).
+- A segmentação algorítmica permanece intencionalmente delimitada ao teto experimental de 12 MP até que a análise por blocos com reconciliação de halos seja homologada.
+- Testes automatizados de HTTP, isolamento de usuários, pirâmide multirresolução (comprovada em fixture de 49 MP), persistência após reinício, aprendizado supervisionado, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
 
 ## Executar (Fedora / Toolbox)
 
@@ -91,7 +94,7 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/pyramid` | Metadados do esquema e níveis da pirâmide multirresolução |
 | `GET` | `/api/v1/images/{id}/tiles/{level}/{x}/{y}.png` | Mosaico PNG (tile 256×256) sob demanda com isolamento por usuário |
 | `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
-| `POST/GET` | `/api/v1/images/{id}/analysis` | Executa ou recupera o baseline experimental e suas regiões |
+| `POST/GET` | `/api/v1/images/{id}/analysis` | Executa (com `?algorithm=BAYESIAN_CALIBRATED`, `TABULAR_INCREMENTAL`, `VISUAL_KNN` ou `BASELINE_HEURISTIC`) ou recupera a análise e suas regiões |
 | `GET` | `/api/v1/images/{id}/analysis-runs` | Lista execuções preservadas da imagem |
 | `POST/GET` | `/api/v1/analysis-regions/{id}/reviews` | Registra ou recupera o histórico humano da região |
 
