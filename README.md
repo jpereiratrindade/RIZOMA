@@ -11,15 +11,17 @@ Aplicação autônoma, inspirada na linguagem visual do **TRAMA** e **TRAMA-RS**
 ## O que já funciona
 
 - Servidor HTTP e núcleo de ingestão em **C++26** (compila em modo `-std=c++2c` no GCC 14 da demonstração).
-- Interface web responsiva, sem dependência de JavaScript de terceiros.
-- Recebimento de PNG, JPEG e TIFF com limites de **12 MiB e 12 megapixels por arquivo**; validação de formato pelo conteúdo e decodificação efetiva.
+- Interface web responsiva, sem dependência de JavaScript de terceiros, com visualizador multirresolução para inspeção contínua (pan e zoom profundo).
+- Ingestão progressiva de imagens (**pipeline EXP-004** em C++26): decodificação streaming (PNG linha a linha, JPEG por scanline, TIFF por scanlines/blocos nativos) sem alocar a imagem inteira em RAM.
+- Geração automática de **pirâmide multirresolução em disco** (mosaicos de 256×256 pixels com subamostragem 2×2) para inspeção profunda e navegação interativa sem limite artificial de megapixels.
+- Recebimento de PNG, JPEG e TIFF; validação estrita de formato pelo conteúdo, verificação de integridade SHA-256 e decodificação efetiva.
 - Registro de nome, identificador opcional de amostra e data opcional de captura; altura/largura, tipo, bytes, SHA-256, data/hora UTC e versão da preparação.
 - Arquivos originais em armazenamento privado endereçado por hash; original nunca sobrescrito pela interface. SHA-256 é identificador do conteúdo, não comprovação de autoria ou garantia de retenção.
-- Prévia redimensionada e derivado em tons de cinza, ambos PNG e separados do original. São arquivos de **inspeção**, não dados científicos para medição.
+- Prévia redimensionada, derivado em tons de cinza e mosaicos da pirâmide gerados separadamente do original. São arquivos exclusivamente de **inspeção e navegação**, preservando sempre as coordenadas e bytes do original imutável.
 - Sinalização operacional de brilho médio da prévia: `REVIEW`, `LOW_LIGHT` e `HIGH_LIGHT`. O baseline experimental pode sugerir regiões `ROOT`/`UNKNOWN` para revisão; não há classificação radicular nem teste automatizado validado cientificamente.
-- SQLite com WAL, registro de evento de ingestão, consultas, filtros, inspeção visual e exportação de manifesto CSV.
-- Fluxo experimental integrado de regiões candidatas, sugestão `ROOT`/`UNKNOWN` e revisão humana persistente (`ROOT`, `MATRIX`, `ARTIFACT`, `UNKNOWN`) com histórico append-only.
-- Teste automatizado de HTTP, persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
+- SQLite com WAL, registro de evento de ingestão, consultas, filtros, inspeção visual profunda e exportação de manifesto CSV.
+- Fluxo experimental integrado de regiões candidatas, sugestão `ROOT`/`UNKNOWN` e revisão humana persistente (`ROOT`, `MATRIX`, `ARTIFACT`, `UNKNOWN`) com histórico append-only. A segmentação algorítmica permanece intencionalmente delimitada ao teto experimental de 12 MP até que a análise por blocos com reconciliação de halos seja homologada.
+- Testes automatizados de HTTP, isolamento de usuários, pirâmide multirresolução (comprovada em fixture de 49 MP), persistência após reinício, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
 
 ## Executar (Fedora / Toolbox)
 
@@ -86,6 +88,8 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/original` | Arquivo original preservado do usuário autenticado |
 | `GET` | `/api/v1/images/{id}/preview` | Prévia PNG para inspeção do usuário autenticado |
 | `GET` | `/api/v1/images/{id}/grayscale` | Derivado PNG em tons de cinza do usuário autenticado |
+| `GET` | `/api/v1/images/{id}/pyramid` | Metadados do esquema e níveis da pirâmide multirresolução |
+| `GET` | `/api/v1/images/{id}/tiles/{level}/{x}/{y}.png` | Mosaico PNG (tile 256×256) sob demanda com isolamento por usuário |
 | `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
 | `POST/GET` | `/api/v1/images/{id}/analysis` | Executa ou recupera o baseline experimental e suas regiões |
 | `GET` | `/api/v1/images/{id}/analysis-runs` | Lista execuções preservadas da imagem |
@@ -117,11 +121,12 @@ Arquivo recebido (original, SHA-256, privado)
      │
      ├── metadados técnicos ──► SQLite WAL + eventos
      │
-     └── preparação v0.2.0 ──► prévia + tons de cinza
-                                        │
-                                        └─► interface de inspeção
+     └── preparação v0.2.0 (EXP-004) ──► pirâmide multirresolução + prévia + tons de cinza
+                                         │
+                                         └─► interface de inspeção multirresolução (pan/zoom)
 
 [ Baseline experimental: regiões candidatas → hipótese → revisão humana persistente ]
+(Gate científico: análise automática em lote delimitada a 12 MP até migração com halo/overlap)
 ```
 
 **Nenhum resultado radicular validado ou medida biológica é produzido.** As regiões são hipóteses experimentais para revisão humana; um retângulo `ROOT` significa apenas que o pesquisador indicou que a região contém possível raiz. A dimensão da imagem em pixels não equivale a uma medida física. A escala e a orientação EXIF não são aplicadas às prévias; o original mantém os bytes originais.
@@ -129,7 +134,7 @@ Arquivo recebido (original, SHA-256, privado)
 ## Limitações intencionais e exigências antes de uso multiusuário
 
 1. **Rede e exposição controlada.** O padrão seguro de execução é `127.0.0.1` (loopback). A opção `--host 0.0.0.0` permite acesso em rede local restrita (laboratório/bancada), mas não deve ser exposta à internet aberta: faltam autenticação de usuários, autorização granular por projeto, HTTPS obrigatório e controle de quotas.
-2. **Upload buffered.** Cada requisição é recebida em memória até 12 MiB e a transformação ocorre sincronamente. A próxima etapa deverá oferecer ingestão em fluxo, staging persistente, verificação e filas para maiores volumes.
+2. **Processamento e análise por blocos.** O pipeline progressivo EXP-004 eliminou o limite artificial de memória para decodificação, pirâmide multirresolução e inspeção interativa de imagens grandes (comprovado com 49 MP no teste de fumaça). Contudo, a etapa de análise algorítmica (`/analysis`) ainda opera in-memory e permanece delimitada a 12 MP até que a segmentação por blocos com halo/overlap e fusão de fronteiras seja implementada.
 3. **Formatos e ciência.** Suporte nativo a PNG, JPEG e TIFF (RGB/escala de cinza/paleta) implementado; formatos multicanal avançados, profundidades superiores a 8 bits no pipeline científico, calibração métrica e metadados instrumentais específicos (tags científicas de scanner/EXIF) serão aprofundados na etapa de caracterização.
 4. **Retenção.** Diretórios privados e WAL não bastam: backups verificados, política de retenção e recuperação de arquivos órfãos precisam ser implementados.
 5. **Integridade.** Sem re-verificação periódica do hash durante a leitura, monitoramento de disco, assinatura de proveniência ou imutabilidade no nível do sistema de arquivos. SHA-256 é calculado na entrada e gravado no catálogo.
