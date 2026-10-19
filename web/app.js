@@ -376,7 +376,24 @@ function fillInspect(){
 }
 
 function regionById(id){ return currentAnalysis?.regions?.find(r => r.id === id); }
-function automaticLabel(label){ return label === 'ROOT' ? 'Possível raiz — não confirmada' : 'Estrutura desconhecida — revisão necessária'; }
+function automaticLabel(label, isRecalibrated = false){
+  if (isRecalibrated) {
+    return label === 'ROOT' ? 'Possível raiz (recalibrada online)' : 'Desconhecida (recalibrada online)';
+  }
+  return label === 'ROOT' ? 'Possível raiz — não confirmada' : 'Estrutura desconhecida — revisão necessária';
+}
+
+function findNextRecommendedRegion(currentId){
+  if(!currentAnalysis?.regions) return null;
+  const pending = currentAnalysis.regions.filter(r => !r.review && r.id !== currentId);
+  if(!pending.length) return null;
+  pending.sort((a, b) => {
+    const confA = a.judgment_evidence?.confidence ?? 0.5;
+    const confB = b.judgment_evidence?.confidence ?? 0.5;
+    return confA - confB;
+  });
+  return pending[0];
+}
 
 async function loadAnalysisRun(runId){
   try{
@@ -399,17 +416,36 @@ function renderAnalysis(){
     return;
   }
   const regions = currentAnalysis.regions || [];
-  overlay.innerHTML = regions.map(r => `<button type="button" class="region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'}" data-region-box="${h(r.id)}" style="left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px" title="Região ${r.ordinal}: ${h(automaticLabel(r.suggestion))}"></button>`).join('');
+  overlay.innerHTML = regions.map(r => {
+    const isRecal = !r.review && r.judgment_evidence?.recalibrated;
+    const cls = `region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'} ${isRecal ? 'recalibrated' : ''}`;
+    const title = `Região ${r.ordinal}: ${h(automaticLabel(r.suggestion, isRecal))}${isRecal ? ' ⚡ Recalibrada em tempo real' : ''}`;
+    return `<button type="button" class="${cls}" data-region-box="${h(r.id)}" style="left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px" title="${title}"></button>`;
+  }).join('');
   for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
   const selected = selectedRegion && regionById(selectedRegion.id);
   panel.innerHTML = `<div class="analysis-head"><div><span class="section-kicker">ANÁLISE EXPERIMENTAL</span><strong>${h(currentAnalysis.algorithm_version)}</strong></div><span class="analysis-count">${number.format(regions.length)} regiões</span></div>
     <label class="run-picker">Execução preservada<select id="analysis-run-picker">${analysisRuns.map((run,index) => `<option value="${h(run.id)}" ${run.id===currentAnalysis.id?'selected':''}>${index+1}. ${h(run.created_at)} · ${number.format(run.region_count)} regiões</option>`).join('')}</select></label>
     <p class="analysis-warning">Sugestões não validadas biologicamente. Coordenadas referem-se ao original SHA-256 <code>${h(currentAnalysis.source_sha256.slice(0,12))}…</code></p>
-    <div class="region-list">${regions.length ? regions.map(r => `<button type="button" data-region-row="${h(r.id)}" class="region-row ${selected?.id === r.id ? 'selected' : ''}"><span>R${r.ordinal}</span><div><strong>${h(r.review?.label || automaticLabel(r.suggestion))}</strong><small>${r.review ? 'Decisão humana v'+r.version : 'Sugestão automática, não confirmada'} · ${number.format(r.area)} px candidatos</small></div></button>`).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
+    <div class="region-list">${regions.length ? regions.map(r => {
+      const isRecal = !r.review && r.judgment_evidence?.recalibrated;
+      const badgePill = isRecal ? '<span class="pill-recalibrated">⚡ Em tempo real</span>' : '';
+      const subText = r.review
+        ? `Decisão humana v${r.version}`
+        : (isRecal ? 'Hipótese atualizada pós-feedback' : 'Sugestão automática inicial');
+      return `<button type="button" data-region-row="${h(r.id)}" class="region-row ${selected?.id === r.id ? 'selected' : ''} ${r.review ? 'reviewed' : (isRecal ? 'recalibrated' : '')}">
+        <span>R${r.ordinal}</span>
+        <div>
+          <strong>${h(r.review?.label || automaticLabel(r.suggestion, isRecal))} ${badgePill}</strong>
+          <small>${subText} · ${number.format(r.area)} px candidatos</small>
+        </div>
+      </button>`;
+    }).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
     ${selected ? reviewEditor(selected) : '<p class="choose-region">Selecione uma região na imagem ou na lista para revisar.</p>'}`;
   for(const row of panel.querySelectorAll('[data-region-row]')) row.onclick = () => selectRegion(row.dataset.regionRow);
   if($('analysis-run-picker')) $('analysis-run-picker').onchange = e => loadAnalysisRun(e.target.value);
-  if($('review-form')) $('review-form').onsubmit = saveReview;
+  if($('review-form')) $('review-form').onsubmit = (e) => saveReview(e, false);
+  if($('btn-next-review')) $('btn-next-review').onclick = (e) => saveReview(e, true);
 }
 
 function reviewEditor(region){
@@ -418,8 +454,22 @@ function reviewEditor(region){
   const learning = jev.learning || {};
   const conf = jev.confidence ? Math.round(jev.confidence * 100) : null;
   const strat = learning.strategy || 'BASELINE';
-  const badge = conf !== null ? `<div class="learning-badge ${learning.uncertainty ? 'uncertain' : ''}">Estratégia: ${h(strat)} · Confiança estimada: ${conf}% ${learning.uncertainty ? '⚠️ Alta Incerteza (Prioridade de Revisão)' : ''}</div>` : '';
-  return `<form id="review-form" class="review-form"><h3>Revisar região R${region.ordinal}</h3>${badge}<p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion))}</strong>. Concordância é evidência técnica, não confiança científica.</p><div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div><label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label><label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label><label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label><button class="button primary full" type="submit">Salvar nova revisão</button><div id="review-history" class="review-history"><small>Carregando histórico…</small></div></form>`;
+  const isRecalibrated = !region.review && jev.recalibrated === true;
+  const badge = conf !== null ? `<div class="learning-badge ${learning.uncertainty ? 'uncertain' : ''} ${isRecalibrated ? 'recalibrated' : ''}">Estratégia: ${h(strat)} · Confiança estimada: ${conf}% ${isRecalibrated ? '⚡ Recalibrada em tempo real' : ''} ${learning.uncertainty ? '⚠️ Alta Incerteza (Prioridade de Revisão)' : ''}</div>` : '';
+  const nextReg = findNextRecommendedRegion(region.id);
+  const nextBtn = nextReg ? `<button type="button" id="btn-next-review" class="button outline full" style="margin-top:6px">Salvar e ir para próxima recomendada (R${nextReg.ordinal}) ➜</button>` : '';
+  return `<form id="review-form" class="review-form">
+    <h3>Revisar região R${region.ordinal}</h3>
+    ${badge}
+    <p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion, isRecalibrated))}</strong>. Concordância é evidência técnica, não confiança científica.</p>
+    <div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div>
+    <label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label>
+    <label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label>
+    <label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label>
+    <button class="button primary full" type="submit">Salvar nova revisão</button>
+    ${nextBtn}
+    <div id="review-history" class="review-history"><small>Carregando histórico…</small></div>
+  </form>`;
 }
 
 async function loadHistory(regionId){
@@ -443,14 +493,16 @@ async function startAnalysis(){
   finally{ button.disabled = false; button.textContent = 'Executar nova análise'; }
 }
 
-async function saveReview(event){
-  event.preventDefault(); if(!selectedRegion) return;
+async function saveReview(event, advanceNext = false){
+  if(event && event.preventDefault) event.preventDefault();
+  if(!selectedRegion) return;
   const targetRegionId = selectedRegion.id;
   const activeRunId = currentAnalysis?.id;
   const action=$('review-action').value;
   const label=action==='SUSPEND'?'UNKNOWN':$('review-label').value;
+  const nextTarget = advanceNext ? findNextRecommendedRegion(targetRegionId) : null;
   try{
-    await api(`/api/v1/analysis-regions/${targetRegionId}/reviews`, {
+    const revRes = await api(`/api/v1/analysis-regions/${targetRegionId}/reviews`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action,label,justification:$('review-justification').value.trim(),expected_version:selectedRegion.version})
@@ -458,10 +510,15 @@ async function saveReview(event){
     const url = `/api/v1/images/${current.id}/analysis` + (activeRunId ? `?run_id=${encodeURIComponent(activeRunId)}` : '');
     const result = await api(url);
     currentAnalysis = result.data;
-    selectedRegion = regionById(targetRegionId);
+    selectedRegion = nextTarget ? regionById(nextTarget.id) : regionById(targetRegionId);
     renderAnalysis();
     if(selectedRegion) loadHistory(selectedRegion.id);
-    toast('Revisão salva no histórico.');
+    const recalibrated = revRes?.recalibrated_count || 0;
+    if(recalibrated > 0){
+      toast(`Revisão salva! ${recalibrated} região(ões) pendente(s) foram recalibradas em tempo real.`);
+    } else {
+      toast('Revisão salva no histórico.');
+    }
   }catch(err){
     toast(err.message === 'Review conflict' ? 'Conflito: a região foi revisada em outra sessão. Recarregue a análise.' : err.message);
   }

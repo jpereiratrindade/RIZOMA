@@ -323,4 +323,145 @@ void record_visual_exemplar(sqlite3* db, const std::string& user_id, const Visua
   }
 }
 
+RecalibrationResult recalibrate_pending_regions(
+    sqlite3* db,
+    const std::string& user_id,
+    const std::string& run_id,
+    const std::string& triggering_region_id,
+    const std::string& now_utc,
+    std::uint64_t image_width,
+    std::uint64_t image_height,
+    const std::vector<unsigned char>* rgba
+) {
+  RecalibrationResult res;
+  if (!db || run_id.empty()) return res;
+
+  std::string algo_name;
+  {
+    sqlite3_stmt* run_st = nullptr;
+    const char* q = "SELECT algorithm FROM analysis_runs WHERE id=?";
+    if (sqlite3_prepare_v2(db, q, -1, &run_st, nullptr) == SQLITE_OK) {
+      sqlite3_bind_text(run_st, 1, run_id.data(), static_cast<int>(run_id.size()), SQLITE_TRANSIENT);
+      if (sqlite3_step(run_st) == SQLITE_ROW) {
+        const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(run_st, 0));
+        if (txt) algo_name = txt;
+      }
+      sqlite3_finalize(run_st);
+    }
+  }
+
+  const auto strategy = parse_strategy(algo_name);
+  if (strategy == Strategy::BASELINE_HEURISTIC) {
+    return res;
+  }
+
+  const char* q_pending = R"SQL(
+    SELECT r.id, r.x, r.y, r.width, r.height, r.area, r.evidence_json,
+           CAST(COALESCE(json_extract(r.evidence_json, '$.global_pixels'), 0) AS INT),
+           CAST(COALESCE(json_extract(r.evidence_json, '$.local_pixels'), 0) AS INT),
+           CAST(COALESCE(json_extract(r.evidence_json, '$.shared_pixels'), 0) AS INT),
+           CAST(COALESCE(json_extract(r.evidence_json, '$.touches_border'), 0) AS INT),
+           CAST(COALESCE(json_extract(r.evidence_json, '$.global_mean'), 128.0) AS REAL),
+           CAST(COALESCE(json_extract(r.evidence_json, '$.global_stddev'), 20.0) AS REAL),
+           j.label
+    FROM analysis_regions r
+    JOIN analysis_judgments j ON j.id = (
+      SELECT j2.id FROM analysis_judgments j2
+      WHERE j2.region_id = r.id AND j2.actor_type = 'ALGORITHM'
+      ORDER BY j2.created_at DESC, j2.rowid DESC LIMIT 1
+    )
+    WHERE r.run_id = ? AND r.current_version = 0 AND r.id != ?
+    ORDER BY r.ordinal
+  )SQL";
+
+  struct PendingRegionData {
+    std::string id;
+    analysis::Region reg;
+    std::string evidence_json;
+    double global_mean{128.0};
+    double global_stddev{20.0};
+    std::string prev_label;
+  };
+
+  std::vector<PendingRegionData> pending_list;
+  sqlite3_stmt* st = nullptr;
+  if (sqlite3_prepare_v2(db, q_pending, -1, &st, nullptr) == SQLITE_OK) {
+    sqlite3_bind_text(st, 1, run_id.data(), static_cast<int>(run_id.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, triggering_region_id.data(), static_cast<int>(triggering_region_id.size()), SQLITE_TRANSIENT);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      PendingRegionData pr;
+      const auto* pid = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+      if (!pid) continue;
+      pr.id = pid;
+      pr.reg.x = static_cast<std::uint64_t>(sqlite3_column_int64(st, 1));
+      pr.reg.y = static_cast<std::uint64_t>(sqlite3_column_int64(st, 2));
+      pr.reg.width = static_cast<std::uint64_t>(sqlite3_column_int64(st, 3));
+      pr.reg.height = static_cast<std::uint64_t>(sqlite3_column_int64(st, 4));
+      pr.reg.area = static_cast<std::uint64_t>(sqlite3_column_int64(st, 5));
+      const auto* ev = reinterpret_cast<const char*>(sqlite3_column_text(st, 6));
+      pr.evidence_json = ev ? ev : "{}";
+      pr.reg.global_pixels = static_cast<std::uint64_t>(sqlite3_column_int64(st, 7));
+      pr.reg.local_pixels = static_cast<std::uint64_t>(sqlite3_column_int64(st, 8));
+      pr.reg.shared_pixels = static_cast<std::uint64_t>(sqlite3_column_int64(st, 9));
+      pr.reg.touches_border = sqlite3_column_int(st, 10) != 0;
+      pr.global_mean = sqlite3_column_double(st, 11);
+      pr.global_stddev = sqlite3_column_double(st, 12);
+      const auto* pl = reinterpret_cast<const char*>(sqlite3_column_text(st, 13));
+      pr.prev_label = pl ? pl : "UNKNOWN";
+      pending_list.push_back(std::move(pr));
+    }
+    sqlite3_finalize(st);
+  }
+
+  if (pending_list.empty()) return res;
+
+  const char* q_insert = R"SQL(
+    INSERT INTO analysis_judgments(id, region_id, actor_type, label, evidence_json, created_at)
+    VALUES(lower(hex(randomblob(12))), ?, 'ALGORITHM', ?, ?, ?)
+  )SQL";
+  sqlite3_stmt* ins_stmt = nullptr;
+  if (sqlite3_prepare_v2(db, q_insert, -1, &ins_stmt, nullptr) != SQLITE_OK) {
+    return res;
+  }
+
+  for (const auto& pr : pending_list) {
+    JudgmentSuggestion suggestion;
+    if (strategy == Strategy::BAYESIAN_CALIBRATED) {
+      suggestion = infer_bayesian(db, user_id, pr.reg, pr.global_mean, pr.global_stddev);
+    } else if (strategy == Strategy::TABULAR_INCREMENTAL) {
+      auto feat = extract_features(pr.reg, image_width, image_height);
+      suggestion = infer_tabular(db, user_id, feat);
+    } else if (strategy == Strategy::VISUAL_KNN) {
+      if (rgba && rgba->size() == image_width * image_height * 4) {
+        auto desc = extract_descriptor(*rgba, image_width, image_height, pr.reg);
+        suggestion = infer_visual_knn(db, user_id, desc);
+      } else {
+        suggestion.label = pr.prev_label;
+        suggestion.confidence = 0.5;
+        suggestion.details_json = "{\"strategy\":\"VISUAL_KNN\",\"fallback\":true}";
+      }
+    }
+
+    std::ostringstream comb;
+    comb << "{\"evidence\":" << pr.evidence_json
+         << ",\"learning\":" << suggestion.details_json
+         << ",\"confidence\":" << std::fixed << std::setprecision(4) << suggestion.confidence
+         << ",\"recalibrated\":true"
+         << ",\"trigger_region_id\":\"" << triggering_region_id << "\"}";
+    std::string comb_str = comb.str();
+
+    sqlite3_reset(ins_stmt);
+    sqlite3_bind_text(ins_stmt, 1, pr.id.data(), static_cast<int>(pr.id.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins_stmt, 2, suggestion.label.data(), static_cast<int>(suggestion.label.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins_stmt, 3, comb_str.data(), static_cast<int>(comb_str.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins_stmt, 4, now_utc.data(), static_cast<int>(now_utc.size()), SQLITE_TRANSIENT);
+    if (sqlite3_step(ins_stmt) == SQLITE_DONE) {
+      ++res.recalibrated_count;
+    }
+  }
+  sqlite3_finalize(ins_stmt);
+
+  return res;
+}
+
 } // namespace rizoma::learning

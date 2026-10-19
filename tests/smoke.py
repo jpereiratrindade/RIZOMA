@@ -131,6 +131,23 @@ def candidate_png(w=64, h=64):
     return signature+chunk(b'IHDR',struct.pack('!IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(rows)))+chunk(b'IEND',b'')
 
 
+def multi_candidate_png(w=80, h=80):
+    signature = b'\x89PNG\r\n\x1a\n'
+    def chunk(kind, value):
+        body = kind + value
+        return struct.pack('!I', len(value)) + body + struct.pack('!I', zlib.crc32(body) & 0xffffffff)
+    rows = []
+    for y in range(h):
+        row = bytearray()
+        for x in range(w):
+            is_r1 = (10 <= y < 60 and 12 <= x < 16)
+            is_r2 = (10 <= y < 60 and 56 <= x < 60)
+            value = 245 if (is_r1 or is_r2) else 25
+            row.extend((value, value, value))
+        rows.append(b'\x00' + bytes(row))
+    return signature+chunk(b'IHDR',struct.pack('!IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(rows)))+chunk(b'IEND',b'')
+
+
 def req(url, method='GET', data=None, headers=None):
     request = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     try:
@@ -332,6 +349,40 @@ def main():
             assert db.execute("SELECT COUNT(*) FROM learning_exemplars").fetchone()[0]>=1
             db.close()
 
+            # Real-time online recalibration of pending regions upon human feedback
+            multi_cand = multi_candidate_png()
+            multi_upload = base+'/api/v1/images?filename=multi-raizes.png&sample_id=RECALIB-01'
+            status,body,_ = req(multi_upload,'POST',multi_cand,headers)
+            assert status==201, (status,body)
+            multi_img_id = json.loads(body)['data']['id']
+            status,body,_ = req(base+f'/api/v1/images/{multi_img_id}/analysis?algorithm=TABULAR_INCREMENTAL','POST',b'',auth_headers)
+            assert status==201, (status,body)
+            multi_analysis = json.loads(body)['data']
+            assert len(multi_analysis['regions']) >= 2, multi_analysis
+            r1 = multi_analysis['regions'][0]
+            r2 = multi_analysis['regions'][1]
+            r1_review_url = base+f"/api/v1/analysis-regions/{r1['id']}/reviews"
+            r1_confirm = {'action':'CONFIRM','label':r1['suggestion'],'justification':'Aprovando R1 para recalibrar modelo online','expected_version':0}
+            status,body,_ = req(r1_review_url,'POST',json.dumps(r1_confirm).encode(),review_headers)
+            assert status==201, (status,body)
+            rev_resp = json.loads(body)
+            assert rev_resp.get('recalibrated_count', 0) >= 1, rev_resp
+
+            # Fetch analysis again: r1 must be reviewed, r2 must be recalibrated and remain pending (version 0)
+            status,body,_ = req(base+f'/api/v1/images/{multi_img_id}/analysis',headers=auth_headers)
+            assert status==200, (status,body)
+            updated_analysis = json.loads(body)['data']
+            up_r1 = [r for r in updated_analysis['regions'] if r['id'] == r1['id']][0]
+            up_r2 = [r for r in updated_analysis['regions'] if r['id'] == r2['id']][0]
+            assert up_r1['version'] == 1 and up_r1['review'] is not None
+            assert up_r2['version'] == 0 and up_r2['review'] is None
+            assert up_r2['judgment_evidence'].get('recalibrated') is True, up_r2
+
+            # Check database: r2 has 2 judgments (initial + recalibrated), maintaining auditability
+            db=sqlite3.connect(Path(temp)/'rizoma.sqlite3')
+            assert db.execute("SELECT COUNT(*) FROM analysis_judgments WHERE region_id=?", (r2['id'],)).fetchone()[0] == 2
+            db.close()
+
             # EXP-004 gate: acquisition and review exceed the former 12 MP ceiling.
             large = progressive_png()
             large_upload = base+'/api/v1/images?filename=campo-progressivo-7001.png&sample_id=EXP-004-GATE'
@@ -403,9 +454,9 @@ def main():
             status,body,_=req(base+'/api/v1/images',headers=auth_headers2)
             assert status==200 and len(json.loads(body)['data'])==1
 
-            # User 1 still sees only their 5 images and cannot access User 2's image
+            # User 1 still sees only their 6 images and cannot access User 2's image
             status,body,_=req(base+'/api/v1/images',headers=auth_headers)
-            assert status==200 and len(json.loads(body)['data'])==5
+            assert status==200 and len(json.loads(body)['data'])==6
             status,body,_=req(base+'/api/v1/images/'+uid2,headers=auth_headers)
             assert status==404, (status,body)
             status,body,_=req(base+'/api/v1/images/'+uid2+'/preview',headers=auth_headers)
@@ -437,7 +488,7 @@ def main():
                     if status==200: break
                 except OSError: time.sleep(.08)
             else: raise AssertionError('Restart failed')
-            assert len(json.loads(body)['data'])==5
+            assert len(json.loads(body)['data'])==6
             status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={first_run_id}',headers=restarted_headers1)
             recovered=json.loads(body)['data']
             assert status==200 and recovered['regions'][0]['review']['label']=='UNKNOWN' and recovered['regions'][0]['review']['action']=='SUSPEND',(status,body)

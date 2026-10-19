@@ -23,6 +23,7 @@ Aplicação autônoma, inspirada na linguagem visual do **TRAMA** e **TRAMA-RS**
   - **Nível 1 (`BAYESIAN_CALIBRATED`):** ajuste empírico dinâmico de limiares e estimativa de probabilidade a posteriori a partir das confirmações históricas.
   - **Nível 2 (`TABULAR_INCREMENTAL`):** classificador logístico com descida de gradiente estocástica (SGD online) sobre atributos morfológicos e radiométricos.
   - **Nível 3 (`VISUAL_KNN`):** similaridade visual por $k$-vizinhos mais próximos ($k$-NN) sobre descritores de patch com amostragem por incerteza (*Active Learning*).
+  - **Recalibração em tempo real (Online HITL):** a cada confirmação ou correção humana, as demais regiões pendentes da imagem aberta são instantaneamente reclassificadas pelo modelo atualizado em tempo real, preservando a auditoria append-only (`analysis_judgments`) sem alterar decisões humanas já consolidadas.
 - A segmentação algorítmica permanece intencionalmente delimitada ao teto experimental de 12 MP até que a análise por blocos com reconciliação de halos seja homologada.
 - Testes automatizados de HTTP, isolamento de usuários, pirâmide multirresolução (comprovada em fixture de 49 MP), persistência após reinício, aprendizado supervisionado, verificação de hash, rejeição de duplicatas, imagem inválida e suporte a PNG, JPEG e TIFF.
 

@@ -49,4 +49,20 @@ VisualDescriptor extract_descriptor(const std::vector<unsigned char>& rgba, std:
 JudgmentSuggestion infer_visual_knn(sqlite3* db, const std::string& user_id, const VisualDescriptor& descriptor);
 void record_visual_exemplar(sqlite3* db, const std::string& user_id, const VisualDescriptor& descriptor, const std::string& label);
 
+// 4. Real-time online recalibration of pending regions
+struct RecalibrationResult {
+  int recalibrated_count{0};
+};
+
+RecalibrationResult recalibrate_pending_regions(
+    sqlite3* db,
+    const std::string& user_id,
+    const std::string& run_id,
+    const std::string& triggering_region_id,
+    const std::string& now_utc,
+    std::uint64_t image_width,
+    std::uint64_t image_height,
+    const std::vector<unsigned char>* rgba = nullptr
+);
+
 } // namespace rizoma::learning

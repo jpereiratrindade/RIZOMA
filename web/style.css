@@ -83,4 +83,8 @@
 .select-strategy{padding:7px 10px;border-radius:6px;border:1px solid var(--line);background:#fff;font-size:.78rem;font-weight:600;color:var(--text)}
 .learning-badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:.70rem;font-weight:700;background:#edf5fd;color:#0b4c8c;border:1px solid #c9e1fa;margin-bottom:6px}
 .learning-badge.uncertain{background:#fff7e6;color:#874d00;border-color:#ffe58f}
+.learning-badge.recalibrated{background:#e8f7ee;color:#0f6d48;border-color:#a8e0c8}
+.region-box.recalibrated{box-shadow:0 0 0 2px #2ea8e8;border-style:dashed}
+.region-row.recalibrated{border-left:3px solid var(--sky);background:#f4faff}
+.pill-recalibrated{display:inline-block;font-size:.60rem;font-weight:800;color:#0b69a3;background:#e3f2fd;border:1px solid #b3d7f5;border-radius:4px;padding:1px 5px;margin-left:5px;vertical-align:middle}
 
