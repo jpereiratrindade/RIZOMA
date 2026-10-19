@@ -139,5 +139,34 @@
 .btn-export-csv{background:#fff;border:1.5px solid #bdd2e2;color:var(--navy);box-shadow:0 2px 6px #0c28440a}
 .btn-export-csv:hover{background:#f0f6fa;border-color:var(--blue);color:var(--blue);transform:translateY(-1px)}
 
+/* Canvas Layer for Global Segmentation */
+.segmented-layer{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none;z-index:1;image-rendering:pixelated}
+
+/* Global Segmentation Card & Layer Inspector */
+.segmentation-card{background:linear-gradient(175deg,#ffffff,#f5f9fd);border:1.5px solid #cbe0f0;border-radius:11px;padding:14px;margin:12px 0;box-shadow:0 4px 14px #0c28440d}
+.segmentation-head{margin-bottom:8px}
+.segmentation-head span{font-size:.65rem;font-weight:900;letter-spacing:.12em;color:var(--blue);text-transform:uppercase;display:block}
+.segmentation-head strong{font-size:.92rem;color:var(--navy)}
+.segmentation-desc{font-size:.76rem;color:var(--muted);margin:0 0 10px;line-height:1.35}
+
+.layer-selector{display:flex;gap:4px;flex-wrap:wrap;background:#e9f1f7;padding:4px;border-radius:8px;margin-bottom:12px}
+.btn-layer{flex:1 1 auto;min-width:70px;padding:6px 8px;font-size:.72rem;font-weight:750;border:0;background:transparent;border-radius:6px;color:var(--muted);cursor:pointer;transition:all .12s;text-align:center}
+.btn-layer:hover{color:var(--navy);background:#ffffff66}
+.btn-layer.active{background:#fff;color:var(--navy);font-weight:800;box-shadow:0 1px 4px #0c284414}
+
+.layer-downloads{background:#fff;border:1px solid #d9e6f2;border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.layer-down-title{font-size:.68rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:8px}
+.down-btn-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.btn-down{background:#f3f7fb;border:1px solid #cedfe8;border-radius:6px;padding:6px 8px;font-size:.71rem;font-weight:750;color:var(--navy);display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:background .12s}
+.btn-down:hover{background:#e7f1f9;border-color:var(--blue);color:var(--blue)}
+
+.validation-section{border-top:1px dashed #cadce8;padding-top:10px;margin-top:8px}
+.val-approved-badge{background:#eaf8f4;border:1.5px solid #a8e0c8;color:#0f6d48;border-radius:8px;padding:10px 12px;font-size:.8rem;font-weight:800;display:flex;flex-direction:column;gap:3px;align-items:center;text-align:center}
+.val-approved-badge small{font-size:.68rem;font-weight:500;color:#278a63}
+.val-actions-row{display:flex;flex-direction:column;gap:6px}
+.btn-validate-final{background:linear-gradient(135deg,#13806c,#0c594c);color:#fff;font-size:.82rem;font-weight:850;padding:10px 14px;border-radius:8px;border:0;cursor:pointer;box-shadow:0 3px 10px #13806c33;transition:transform .12s,box-shadow .12s}
+.btn-validate-final:hover{background:linear-gradient(135deg,#17947d,#106959);transform:translateY(-1px);box-shadow:0 5px 14px #13806c44}
+
+
 
 

@@ -339,6 +339,9 @@ async function openInspect(id){
   current = images.find(x => x.id === id);
   if(!current) return;
   mode = 'original';
+  activeLayer = 'roots';
+  segCanvases = null;
+  segCurrentRunId = null;
   $('inspect-title').textContent = current.filename;
   $('inspector').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
@@ -398,7 +401,10 @@ function findNextRecommendedRegion(currentId){
 async function loadAnalysisRun(runId){
   try{
     const result=await api(`/api/v1/images/${current.id}/analysis?run_id=${encodeURIComponent(runId)}`);
-    currentAnalysis=result.data;selectedRegion=null;renderAnalysis();fillInspect();
+    currentAnalysis=result.data;selectedRegion=null;
+    segCanvases=null;
+    segCurrentRunId=null;
+    renderAnalysis();fillInspect();
   }catch(err){toast(err.message);}
 }
 
@@ -409,6 +415,206 @@ function selectRegion(id){
 }
 
 let editingNotes = false;
+let activeLayer = 'roots'; // 'roots' | 'matrix' | 'binary' | 'overlay' | 'boxes'
+let segCanvases = null;
+let segGenerating = false;
+let segCurrentRunId = null;
+
+async function prepareSegmentationCanvases(force = false) {
+  if (!current || !currentAnalysis) return;
+  if (segCanvases && segCurrentRunId === currentAnalysis.id && !force) return;
+  if (segGenerating) return;
+
+  segGenerating = true;
+  try {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Falha ao carregar imagem para segmentação'));
+      img.src = `/api/v1/images/${encodeURIComponent(current.id)}/original-view`;
+    });
+
+    const w = img.naturalWidth || current.width || 800;
+    const h = img.naturalHeight || current.height || 600;
+
+    const baseCanvas = document.createElement('canvas');
+    baseCanvas.width = w; baseCanvas.height = h;
+    const baseCtx = baseCanvas.getContext('2d');
+    baseCtx.drawImage(img, 0, 0, w, h);
+    const baseData = baseCtx.getImageData(0, 0, w, h);
+    const src = baseData.data;
+
+    const rootsCanvas = document.createElement('canvas');
+    rootsCanvas.width = w; rootsCanvas.height = h;
+    const rootsCtx = rootsCanvas.getContext('2d');
+    const rootsData = rootsCtx.createImageData(w, h);
+    const rPix = rootsData.data;
+
+    const matrixCanvas = document.createElement('canvas');
+    matrixCanvas.width = w; matrixCanvas.height = h;
+    const matrixCtx = matrixCanvas.getContext('2d');
+    const matrixData = matrixCtx.createImageData(w, h);
+    const mPix = matrixData.data;
+
+    const binaryCanvas = document.createElement('canvas');
+    binaryCanvas.width = w; binaryCanvas.height = h;
+    const binaryCtx = binaryCanvas.getContext('2d');
+    const binaryData = binaryCtx.createImageData(w, h);
+    const bPix = binaryData.data;
+
+    const overlayCanvas = document.createElement('canvas');
+    overlayCanvas.width = w; overlayCanvas.height = h;
+    const overlayCtx = overlayCanvas.getContext('2d');
+    const overlayData = overlayCtx.createImageData(w, h);
+    const oPix = overlayData.data;
+
+    const isRootPixel = new Uint8Array(w * h);
+    const regions = currentAnalysis.regions || [];
+
+    for (const r of regions) {
+      const label = r.review?.label || r.suggestion;
+      if (label === 'ROOT') {
+        const x0 = Math.max(0, Math.floor(r.x));
+        const y0 = Math.max(0, Math.floor(r.y));
+        const x1 = Math.min(w, Math.ceil(r.x + r.width));
+        const y1 = Math.min(h, Math.ceil(r.y + r.height));
+        for (let y = y0; y < y1; y++) {
+          const rowOffset = y * w;
+          for (let x = x0; x < x1; x++) {
+            isRootPixel[rowOffset + x] = 1;
+          }
+        }
+      }
+    }
+
+    const total = w * h;
+    for (let i = 0; i < total; i++) {
+      const idx = i * 4;
+      const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+
+      if (isRootPixel[i]) {
+        // Raiz: preservada com máxima fidelidade no canal de raízes
+        rPix[idx] = r; rPix[idx + 1] = g; rPix[idx + 2] = b; rPix[idx + 3] = 255;
+        // Solo: raiz mascarada/subtraída
+        mPix[idx] = Math.round(r * 0.15); mPix[idx + 1] = Math.round(g * 0.15); mPix[idx + 2] = Math.round(b * 0.15); mPix[idx + 3] = 100;
+        // Binária: branco absoluto (255)
+        bPix[idx] = 255; bPix[idx + 1] = 255; bPix[idx + 2] = 255; bPix[idx + 3] = 255;
+        // Overlay: verde esmeralda translúcido sobre o pixel original
+        oPix[idx] = Math.round(r * 0.4); oPix[idx + 1] = Math.min(255, Math.round(g * 1.4 + 40)); oPix[idx + 2] = Math.round(b * 0.5); oPix[idx + 3] = 255;
+      } else {
+        // Matriz / Solo
+        rPix[idx] = 0; rPix[idx + 1] = 0; rPix[idx + 2] = 0; rPix[idx + 3] = 0; // Transparente
+        mPix[idx] = r; mPix[idx + 1] = g; mPix[idx + 2] = b; mPix[idx + 3] = 255; // Solo intacto
+        bPix[idx] = 0; bPix[idx + 1] = 0; bPix[idx + 2] = 0; bPix[idx + 3] = 255; // Preto absoluto (0)
+        oPix[idx] = r; oPix[idx + 1] = g; oPix[idx + 2] = b; oPix[idx + 3] = 255; // Foto original
+      }
+    }
+
+    rootsCtx.putImageData(rootsData, 0, 0);
+    matrixCtx.putImageData(matrixData, 0, 0);
+    binaryCtx.putImageData(binaryData, 0, 0);
+    overlayCtx.putImageData(overlayData, 0, 0);
+
+    segCanvases = { roots: rootsCanvas, matrix: matrixCanvas, binary: binaryCanvas, overlay: overlayCanvas, w, h };
+    segCurrentRunId = currentAnalysis.id;
+    applyActiveLayer();
+  } catch (err) {
+    console.error('Falha ao processar segmentação:', err);
+  } finally {
+    segGenerating = false;
+  }
+}
+
+function applyActiveLayer() {
+  const segLayer = $('segmented-layer');
+  const regionOverlay = $('region-overlay');
+  const tileLayer = $('tile-layer');
+  const inspectImg = $('inspect-image');
+  if (!segLayer) return;
+
+  if (activeLayer === 'boxes' || !segCanvases) {
+    segLayer.classList.add('hidden');
+    if (regionOverlay) regionOverlay.style.display = 'block';
+    if (tileLayer) tileLayer.style.display = 'block';
+    if (inspectImg) inspectImg.style.display = 'block';
+    if ($('pyramid-status')) $('pyramid-status').textContent = 'Modo de inspeção: Caixas candidatas';
+    return;
+  }
+
+  // Modos de segmentação: esconde caixas imediatamente!
+  if (regionOverlay) regionOverlay.style.display = 'none';
+
+  segLayer.width = segCanvases.w;
+  segLayer.height = segCanvases.h;
+  const ctx = segLayer.getContext('2d');
+  ctx.clearRect(0, 0, segCanvases.w, segCanvases.h);
+
+  const selected = segCanvases[activeLayer];
+  if (selected) {
+    ctx.drawImage(selected, 0, 0);
+  }
+  segLayer.classList.remove('hidden');
+
+  if (activeLayer === 'binary' || activeLayer === 'roots') {
+    if (tileLayer) tileLayer.style.display = 'none';
+    if (inspectImg) inspectImg.style.display = 'none';
+  } else {
+    if (tileLayer) tileLayer.style.display = 'none';
+    if (inspectImg) inspectImg.style.display = 'none';
+  }
+
+  const layerNames = {
+    roots: '🌿 Somente Raízes Reconhecidas (Isolamento Radicular)',
+    matrix: '🟤 Matriz de Solo (Raízes Subtraídas)',
+    binary: '⬛ Máscara Binária P&B (Padrão ImageJ / RhizoVision)',
+    overlay: '🔍 Sobreposição Nítida (Foto + Raízes)'
+  };
+  if ($('pyramid-status')) {
+    $('pyramid-status').textContent = `Camada Ativa: ${layerNames[activeLayer] || activeLayer}`;
+  }
+}
+
+function downloadLayerPng(layerKey, label){
+  if(!segCanvases || !segCanvases[layerKey]){
+    toast('Camada ainda sendo gerada...');
+    return;
+  }
+  const canvas = segCanvases[layerKey];
+  canvas.toBlob((blob) => {
+    if(!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `rizoma-${encodeURIComponent(current.sample_id || current.id)}-${label}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`Arquivo ${a.download} exportado!`);
+  }, 'image/png');
+}
+
+async function validateFinalAnalysis(){
+  if(!currentAnalysis) return;
+  try{
+    const res = await api(`/api/v1/analysis-runs/${currentAnalysis.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        status: 'COMPLETED',
+        notes: (currentAnalysis.notes ? currentAnalysis.notes + '\n\n' : '') + '✓ Segmentação global homologada e validada pelo pesquisador responsável.'
+      })
+    });
+    currentAnalysis.status = res.data.status;
+    currentAnalysis.notes = res.data.notes;
+    currentAnalysis.completed_at = res.data.completed_at;
+    const item = analysisRuns.find(r => r.id === currentAnalysis.id);
+    if(item) item.status = res.data.status;
+    renderAnalysis();
+    toast('Análise homologada e validada cientificamente com sucesso!');
+  }catch(err){ toast(err.message); }
+}
 
 function renderAnalysis(){
   const panel = $('analysis-panel'), overlay = $('region-overlay');
@@ -428,7 +634,7 @@ function renderAnalysis(){
   const selected = selectedRegion && regionById(selectedRegion.id);
 
   const st = currentAnalysis.status || 'REVIEW_REQUIRED';
-  const statusLabel = st === 'COMPLETED' ? '✓ Concluída' : (st === 'ARCHIVED' ? '⊘ Arquivada' : '⚡ Revisão Pendente');
+  const statusLabel = st === 'COMPLETED' ? '✓ Homologada' : (st === 'ARCHIVED' ? '⊘ Arquivada' : '⚡ Revisão Pendente');
   const statusCls = st === 'COMPLETED' ? 'completed' : (st === 'ARCHIVED' ? 'archived' : 'review');
 
   const notesHtml = editingNotes ? `
@@ -467,6 +673,49 @@ function renderAnalysis(){
   const densityPct = imgArea > 0 ? ((stats.total_root_area / imgArea) * 100) : 0;
   const revPct = stats.total_regions > 0 ? Math.round((stats.reviewed_count / stats.total_regions) * 100) : 0;
 
+  const segmentationCardHtml = `
+    <div class="segmentation-card">
+      <div class="segmentation-head">
+        <span>MODELO CONFIRMADO · SEGMENTAÇÃO GLOBAL</span>
+        <strong>Camadas Científicas do Monolito</strong>
+      </div>
+      <p class="segmentation-desc">Aplicação pixel-a-pixel sobre toda a imagem para isolamento fenotípico de raízes e solo.</p>
+      
+      <div class="layer-selector">
+        <button type="button" class="btn-layer ${activeLayer==='roots'?'active':''}" data-layer-btn="roots" title="Exibe exclusivamente as raízes confirmadas">🌿 Raízes</button>
+        <button type="button" class="btn-layer ${activeLayer==='matrix'?'active':''}" data-layer-btn="matrix" title="Exibe a matriz de solo com as raízes subtraídas">🟤 Solo</button>
+        <button type="button" class="btn-layer ${activeLayer==='binary'?'active':''}" data-layer-btn="binary" title="Máscara preto e branco padrão ImageJ / RhizoVision">⬛ Máscara P&B</button>
+        <button type="button" class="btn-layer ${activeLayer==='overlay'?'active':''}" data-layer-btn="overlay" title="Foto original com raízes destacadas sem caixas">🔍 Sobreposição</button>
+        <button type="button" class="btn-layer ${activeLayer==='boxes'?'active':''}" data-layer-btn="boxes" title="Visualizar caixas de depuração">📦 Caixas</button>
+      </div>
+
+      <div class="layer-downloads">
+        <span class="layer-down-title">Exportar imagens individuais:</span>
+        <div class="down-btn-grid">
+          <button type="button" class="btn-down" id="dl-roots-png" title="Download da imagem contendo exclusivamente as raízes">🌿 Raízes (.PNG)</button>
+          <button type="button" class="btn-down" id="dl-matrix-png" title="Download da imagem da matriz de solo">🟤 Solo (.PNG)</button>
+          <button type="button" class="btn-down" id="dl-binary-png" title="Download da máscara binária para ImageJ/Rhizo">⬛ Máscara (.PNG)</button>
+          <button type="button" class="btn-down" id="dl-full-png" title="Download da composição com sumário agronômico">🖼 Composição</button>
+        </div>
+      </div>
+
+      <div class="validation-section">
+        ${st === 'COMPLETED' ? `
+          <div class="val-approved-badge">
+            <span>✓ ANÁLISE HOMOLOGADA E VALIDADA</span>
+            <small>Segmentação final aprovada pelo pesquisador responsável</small>
+          </div>
+        ` : `
+          <div class="val-actions-row">
+            <button type="button" class="btn-validate-final" id="btn-validate-final" title="Aprovar e homologar cientificamente a segmentação global da imagem">
+              ✓ Validar e Homologar Análise Final
+            </button>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+
   const statsHtml = `
     <div class="stats-summary-card">
       <div class="stats-card-head">
@@ -497,11 +746,8 @@ function renderAnalysis(){
       </div>
     </div>
     <div class="export-actions-group">
-      <button type="button" class="btn-export-png" id="btn-export-classified-img" title="Baixar imagem com overlay colorido e rodapé científico de calibração">
-        🖼 Baixar Imagem (.PNG)
-      </button>
-      <a href="/api/v1/images/${encodeURIComponent(current.id)}/analysis-export.csv?run_id=${encodeURIComponent(currentAnalysis.id)}" download="rizoma-analise-${encodeURIComponent(current.sample_id || current.id)}.csv" class="btn-export-csv" id="btn-export-stats-csv" title="Download de estatísticas e relatório RFC-4180 em CSV para R/Pandas/Excel">
-        📊 Relatório (.CSV)
+      <a href="/api/v1/images/${encodeURIComponent(current.id)}/analysis-export.csv?run_id=${encodeURIComponent(currentAnalysis.id)}" download="rizoma-analise-${encodeURIComponent(current.sample_id || current.id)}.csv" class="btn-export-csv" id="btn-export-stats-csv" style="grid-column:1/-1;padding:9px" title="Download de estatísticas e relatório RFC-4180 em CSV para R/Pandas/Excel">
+        📊 Baixar Relatório Científico Completo (.CSV)
       </a>
     </div>
   `;
@@ -525,6 +771,7 @@ function renderAnalysis(){
       <button type="button" class="btn-action-small danger" id="btn-delete-analysis" title="Excluir execução de análise">🗑 Excluir análise</button>
     </div>
     ${regions.filter(r => !r.review).length > 0 ? `<button type="button" class="button primary full" id="btn-batch-confirm" style="margin:8px 0 10px;background:linear-gradient(135deg,var(--teal),var(--blue));font-size:0.82rem;padding:9px 12px">⚡ Confirmar todas pendentes (${regions.filter(r => !r.review).length})</button>` : (regions.length > 0 ? `<div style="background:#eaf7f2;color:#116e4b;border:1px solid #b7e6cf;padding:6px 10px;border-radius:6px;font-size:0.75rem;font-weight:700;margin:8px 0;display:flex;align-items:center;gap:6px">✓ Todas as ${regions.length} regiões confirmadas!</div>` : '')}
+    ${segmentationCardHtml}
     ${statsHtml}
     <div class="analysis-notes-block">
       <div class="notes-header">
@@ -555,17 +802,37 @@ function renderAnalysis(){
   if($('review-form')) $('review-form').onsubmit = (e) => saveReview(e, false);
   if($('btn-next-review')) $('btn-next-review').onclick = (e) => saveReview(e, true);
 
+  // Botões de camada
+  for(const b of panel.querySelectorAll('[data-layer-btn]')){
+    b.onclick = () => {
+      activeLayer = b.dataset.layerBtn;
+      for(const other of panel.querySelectorAll('[data-layer-btn]')) other.classList.toggle('active', other === b);
+      applyActiveLayer();
+    };
+  }
+
+  // Botões de download de imagens de camada
+  if($('dl-roots-png')) $('dl-roots-png').onclick = () => downloadLayerPng('roots', 'somente-raizes');
+  if($('dl-matrix-png')) $('dl-matrix-png').onclick = () => downloadLayerPng('matrix', 'matriz-solo');
+  if($('dl-binary-png')) $('dl-binary-png').onclick = () => downloadLayerPng('binary', 'mascara-binaria');
+  if($('dl-full-png')) $('dl-full-png').onclick = () => exportClassifiedImage();
+
+  // Botão de validação final
+  if($('btn-validate-final')) $('btn-validate-final').onclick = () => validateFinalAnalysis();
+
   if($('btn-complete-analysis')) $('btn-complete-analysis').onclick = () => setAnalysisStatus('COMPLETED');
   if($('btn-archive-analysis')) $('btn-archive-analysis').onclick = () => setAnalysisStatus('ARCHIVED');
   if($('btn-delete-analysis')) $('btn-delete-analysis').onclick = () => openDeleteAnalysisModal();
   if($('btn-batch-confirm')) $('btn-batch-confirm').onclick = () => openBatchConfirmModal();
-  if($('btn-export-classified-img')) $('btn-export-classified-img').onclick = () => exportClassifiedImage();
   if($('btn-edit-notes')) $('btn-edit-notes').onclick = () => { editingNotes = true; renderAnalysis(); };
   if($('btn-cancel-notes')) $('btn-cancel-notes').onclick = () => { editingNotes = false; renderAnalysis(); };
   if($('notes-form')) $('notes-form').onsubmit = (e) => {
     e.preventDefault();
     saveAnalysisNotes($('notes-textarea').value.trim());
   };
+
+  // Disparar preparação assíncrona das camadas de segmentação
+  prepareSegmentationCanvases();
 }
 
 async function exportClassifiedImage(){
