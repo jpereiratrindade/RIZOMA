@@ -5,7 +5,10 @@
 .analysis-canvas{position:relative;display:inline-block;line-height:0;max-width:100%}
 .analysis-canvas img{display:block}.region-overlay{position:absolute;inset:0;pointer-events:none}
 .region-box{position:absolute;min-width:5px;min-height:5px;border:2px solid #f0a225;background:#f0a22522;pointer-events:auto;padding:0}
-.region-box.root{border-color:#20b68a;background:#20b68a24}.region-box.selected{outline:3px solid #fff;box-shadow:0 0 0 5px #177bc8;z-index:2}
+.region-box.root{border-color:#20b68a;background:#20b68a24}
+.region-box.selected{outline:3px solid #fff;border:2px solid #00ffcc;box-shadow:0 0 0 4px #0c7ac4,0 0 16px #00ffccaa;z-index:10;animation:pulse-box 1.5s infinite}
+@keyframes pulse-box{0%{box-shadow:0 0 0 3px #0c7ac4,0 0 8px #00ffcc88}50%{box-shadow:0 0 0 5px #00ffcc,0 0 20px #00ffccdd}100%{box-shadow:0 0 0 3px #0c7ac4,0 0 8px #00ffcc88}}
+.region-box-tag{position:absolute;top:-22px;left:-2px;background:#005a9c;color:#fff;font-size:.65rem;font-weight:850;padding:2px 6px;border-radius:4px;white-space:nowrap;box-shadow:0 2px 6px #0004;border:1px solid #ffffff66;pointer-events:none}
 .analysis-panel{padding:20px;border-left:1px solid var(--line);overflow:auto;background:#f8fbfd;min-height:420px}
 .analysis-empty{padding:26px 10px;color:var(--muted);text-align:center}.analysis-empty strong{color:var(--navy)}.analysis-empty p{font-size:.82rem}
 .analysis-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.analysis-head strong{display:block;color:var(--navy);font-size:.82rem;margin-top:4px}.analysis-count{background:#e7f4f2;color:var(--teal);padding:5px 8px;border-radius:12px;font-size:.7rem;font-weight:800}
@@ -195,6 +198,16 @@
 .scale-row input{width:70px;padding:4px 8px;border:1px solid #c7d8e3;border-radius:5px;font-size:.75rem;font-weight:700;color:var(--navy)}
 .scale-result{font-size:.71rem;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between}
 .scale-result strong{color:var(--navy)}
+
+/* High-resolution Sample Inspection Crop Card */
+.sample-crop-wrap{background:#0a2034;border-radius:10px;padding:12px 14px;margin:12px 0 14px;border:1.5px solid #1c456b;box-shadow:0 6px 18px #00000028}
+.sample-crop-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sample-crop-head span{font-size:.65rem;font-weight:900;letter-spacing:.12em;color:var(--sky);text-transform:uppercase}
+.sample-crop-head strong{font-size:.78rem;color:#fff}
+.sample-crop-canvas{width:100%;height:160px;background:#030d17;border-radius:6px;border:1px solid #28547e;display:block}
+.sample-crop-foot{display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:.68rem;color:#8fb6d3}
+.btn-focus-sample{background:linear-gradient(135deg,#1a598a,#124368);color:#fff;border:0;border-radius:5px;padding:5px 10px;font-size:.7rem;font-weight:750;cursor:pointer;transition:background .15s}
+.btn-focus-sample:hover{background:var(--blue)}
 
 
 

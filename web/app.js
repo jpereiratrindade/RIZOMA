@@ -352,8 +352,18 @@ async function openInspect(id){
   selectedRegion = null;
   renderAnalysis();
   try{
-    const runs = await api(`/api/v1/images/${current.id}/analysis-runs`); analysisRuns = runs.data || [];
-    const result = await api(`/api/v1/images/${current.id}/analysis`); currentAnalysis = result.data; renderAnalysis(); fillInspect(); if(currentAnalysis) $('start-analysis').textContent='Executar nova análise';
+    const runs = await api(`/api/v1/images/${current.id}/analysis-runs`);
+    analysisRuns = runs.data || [];
+    const result = await api(`/api/v1/images/${current.id}/analysis`);
+    currentAnalysis = result.data;
+    selectedRegion = currentAnalysis?.regions?.[0] || null;
+    renderAnalysis();
+    fillInspect();
+    if(selectedRegion) {
+      loadHistory(selectedRegion.id);
+      renderSampleCrop(selectedRegion);
+    }
+    if(currentAnalysis) $('start-analysis').textContent = '↻ Re-analisar';
   }catch(err){ toast(err.message); }
   $('close-inspect').focus();
 }
@@ -401,17 +411,105 @@ function findNextRecommendedRegion(currentId){
 async function loadAnalysisRun(runId){
   try{
     const result=await api(`/api/v1/images/${current.id}/analysis?run_id=${encodeURIComponent(runId)}`);
-    currentAnalysis=result.data;selectedRegion=null;
+    currentAnalysis=result.data;
+    selectedRegion=currentAnalysis?.regions?.[0] || null;
     segCanvases=null;
     segCurrentRunId=null;
     renderAnalysis();fillInspect();
+    if(selectedRegion){
+      loadHistory(selectedRegion.id);
+      renderSampleCrop(selectedRegion);
+    }
   }catch(err){toast(err.message);}
 }
 
-function selectRegion(id){
+function centerOnRegion(r) {
+  if (!r || !current) return;
+  const stage = $('image-stage');
+  if (!stage) return;
+  const targetX = r.x + r.width / 2;
+  const targetY = r.y + r.height / 2;
+  const minDesiredScale = Math.min(2.5, Math.max(0.85, (stage.clientWidth * 0.45) / Math.max(r.width, r.height)));
+  if (viewer.scale < minDesiredScale) {
+    viewer.scale = minDesiredScale;
+  }
+  viewer.fit = false;
+  viewer.x = stage.clientWidth / 2 - targetX * viewer.scale;
+  viewer.y = stage.clientHeight / 2 - targetY * viewer.scale;
+  clampViewer();
+  renderViewer();
+}
+
+function renderSampleCrop(region) {
+  const container = $('sample-crop-canvas');
+  if (!container || !region || !current) return;
+  const ctx = container.getContext('2d');
+  const cw = container.width, ch = container.height;
+  ctx.clearRect(0, 0, cw, ch);
+
+  const drawWithImg = (sourceImg) => {
+    const swReal = sourceImg.naturalWidth || sourceImg.width || current.width;
+    const shReal = sourceImg.naturalHeight || sourceImg.height || current.height;
+    const scaleX = swReal / current.width;
+    const scaleY = shReal / current.height;
+
+    const rx = region.x * scaleX, ry = region.y * scaleY;
+    const rw = region.width * scaleX, rh = region.height * scaleY;
+
+    const padX = Math.max(20, rw * 0.45);
+    const padY = Math.max(20, rh * 0.45);
+    const sx = Math.max(0, rx - padX);
+    const sy = Math.max(0, ry - padY);
+    const sw = Math.min(swReal - sx, rw + padX * 2);
+    const sh = Math.min(shReal - sy, rh + padY * 2);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, cw, ch);
+
+    const mapX = cw / sw;
+    const mapY = ch / sh;
+    const bx = (rx - sx) * mapX;
+    const by = (ry - sy) * mapY;
+    const bw = rw * mapX;
+    const bh = rh * mapY;
+
+    // Caixa de destaque da amostra sobre o recorte
+    ctx.strokeStyle = '#00ffcc';
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // Tag
+    ctx.fillStyle = '#07243e';
+    ctx.fillRect(bx, Math.max(0, by - 20), 40, 19);
+    ctx.strokeStyle = '#00ffcc';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, Math.max(0, by - 20), 40, 19);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.fillText(`R${region.ordinal}`, bx + 5, Math.max(14, by - 6));
+  };
+
+  const inspectImg = $('inspect-image');
+  if (inspectImg && inspectImg.complete && inspectImg.naturalWidth > 0) {
+    drawWithImg(inspectImg);
+  } else {
+    const tempImg = new Image();
+    tempImg.crossOrigin = 'anonymous';
+    tempImg.onload = () => drawWithImg(tempImg);
+    tempImg.src = `/api/v1/images/${encodeURIComponent(current.id)}/original-view`;
+  }
+}
+
+function selectRegion(id, shouldCenter = true){
   selectedRegion = regionById(id);
   renderAnalysis();
-  if(selectedRegion) loadHistory(selectedRegion.id);
+  applyActiveLayer();
+  if(selectedRegion){
+    loadHistory(selectedRegion.id);
+    if(shouldCenter) centerOnRegion(selectedRegion);
+    renderSampleCrop(selectedRegion);
+  }
 }
 
 let editingNotes = false;
@@ -650,29 +748,42 @@ function applyActiveLayer() {
     b.classList.toggle('active', l === activeLayer);
   }
 
-  // Camada 1: Original Intacta e Preservada (Sem caixas e sem filtros)
+  // Visibilidade das caixas:
+  // Se for 'boxes', exibe todas as caixas.
+  // Se houver uma amostra selecionada (selectedRegion), exibe a caixa dela em destaque em qualquer camada!
+  if (regionOverlay) {
+    if (activeLayer === 'boxes') {
+      regionOverlay.style.display = 'block';
+      for (const box of regionOverlay.children) box.style.display = 'block';
+    } else if (selectedRegion) {
+      regionOverlay.style.display = 'block';
+      for (const box of regionOverlay.children) {
+        box.style.display = (box.dataset.regionBox === selectedRegion.id) ? 'block' : 'none';
+      }
+    } else {
+      regionOverlay.style.display = 'none';
+    }
+  }
+
+  // Camada 1: Original Intacta e Preservada
   if (activeLayer === 'original') {
     segLayer.classList.add('hidden');
-    if (regionOverlay) regionOverlay.style.display = 'none';
     if (tileLayer) tileLayer.style.display = 'block';
     if (inspectImg) inspectImg.style.display = 'block';
-    if ($('pyramid-status')) $('pyramid-status').textContent = '📷 Imagem Original Preservada (Intacta, sem alterações)';
+    if ($('pyramid-status')) $('pyramid-status').textContent = '📷 Imagem Original Preservada (Intacta)';
     return;
   }
 
-  // Camada de Caixas/Fragmentos de Calibração
+  // Camada de Caixas / Fragmentos de Calibração
   if (activeLayer === 'boxes' || !segCanvases) {
     segLayer.classList.add('hidden');
-    if (regionOverlay) regionOverlay.style.display = 'block';
     if (tileLayer) tileLayer.style.display = 'block';
     if (inspectImg) inspectImg.style.display = 'block';
     if ($('pyramid-status')) $('pyramid-status').textContent = 'Modo de calibração: Fragmentos/Amostras iniciais';
     return;
   }
 
-  // Camadas de Segmentação Densa de Toda a Imagem (Esconde caixas imediatamente!)
-  if (regionOverlay) regionOverlay.style.display = 'none';
-
+  // Camadas de Segmentação Densa de Toda a Imagem
   segLayer.width = segCanvases.w;
   segLayer.height = segCanvases.h;
   const ctx = segLayer.getContext('2d');
@@ -684,12 +795,12 @@ function applyActiveLayer() {
   }
   segLayer.classList.remove('hidden');
 
-  if (activeLayer === 'binary' || activeLayer === 'roots') {
+  if (activeLayer === 'roots' || activeLayer === 'matrix' || activeLayer === 'binary') {
     if (tileLayer) tileLayer.style.display = 'none';
     if (inspectImg) inspectImg.style.display = 'none';
   } else {
-    if (tileLayer) tileLayer.style.display = 'none';
-    if (inspectImg) inspectImg.style.display = 'none';
+    if (tileLayer) tileLayer.style.display = 'block';
+    if (inspectImg) inspectImg.style.display = 'block';
   }
 
   const layerNames = {
@@ -822,9 +933,11 @@ function renderAnalysis(){
   const regions = currentAnalysis.regions || [];
   overlay.innerHTML = regions.map(r => {
     const isRecal = !r.review && r.judgment_evidence?.recalibrated;
-    const cls = `region-box ${selectedRegion?.id === r.id ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'} ${isRecal ? 'recalibrated' : ''}`;
+    const isSelected = selectedRegion?.id === r.id;
+    const cls = `region-box ${isSelected ? 'selected' : ''} ${r.suggestion === 'ROOT' ? 'root' : 'unknown'} ${isRecal ? 'recalibrated' : ''}`;
     const title = `Região ${r.ordinal}: ${h(automaticLabel(r.suggestion, isRecal))}${isRecal ? ' ⚡ Recalibrada em tempo real' : ''}`;
-    return `<button type="button" class="${cls}" data-region-box="${h(r.id)}" style="left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px" title="${title}"></button>`;
+    const tag = isSelected ? `<span class="region-box-tag">Amostra R${r.ordinal}</span>` : '';
+    return `<button type="button" class="${cls}" data-region-box="${h(r.id)}" style="left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px" title="${title}">${tag}</button>`;
   }).join('');
   for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
   const selected = selectedRegion && regionById(selectedRegion.id);
@@ -1070,6 +1183,14 @@ function renderAnalysis(){
     e.preventDefault();
     saveAnalysisNotes($('notes-textarea').value.trim());
   };
+
+  // Recorte da amostra selecionada e botão de foco
+  if (selected) {
+    renderSampleCrop(selected);
+    if ($('btn-focus-sample')) {
+      $('btn-focus-sample').onclick = () => centerOnRegion(selected);
+    }
+  }
 
   // Disparar preparação assíncrona das camadas de segmentação
   prepareSegmentationCanvases();
@@ -1347,8 +1468,24 @@ function reviewEditor(region){
   const badge = conf !== null ? `<div class="learning-badge ${learning.uncertainty ? 'uncertain' : ''} ${isRecalibrated ? 'recalibrated' : ''}">Estratégia: ${h(strat)} · Confiança estimada: ${conf}% ${isRecalibrated ? '⚡ Recalibrada em tempo real' : ''} ${learning.uncertainty ? '⚠️ Alta Incerteza (Prioridade de Revisão)' : ''}</div>` : '';
   const nextReg = findNextRecommendedRegion(region.id);
   const nextBtn = nextReg ? `<button type="button" id="btn-next-review" class="button outline full" style="margin-top:6px">Salvar e ir para próxima recomendada (R${nextReg.ordinal}) ➜</button>` : '';
+
+  const sampleCropHtml = `
+    <div class="sample-crop-wrap">
+      <div class="sample-crop-head">
+        <span>AMOSTRA SELECIONADA</span>
+        <strong>R${region.ordinal} · ${region.suggestion === 'ROOT' ? '🌿 Possível Raiz' : '🟤 Solo'}</strong>
+      </div>
+      <canvas id="sample-crop-canvas" class="sample-crop-canvas" width="280" height="160" title="Recorte ampliado da amostra R${region.ordinal}"></canvas>
+      <div class="sample-crop-foot">
+        <span>${number.format(region.width)} × ${number.format(region.height)} px (${number.format(region.area)} px²)</span>
+        <button type="button" class="btn-focus-sample" id="btn-focus-sample" title="Centralizar visualização nesta amostra">🔍 Focar no monolito</button>
+      </div>
+    </div>
+  `;
+
   return `<form id="review-form" class="review-form">
     <h3>Revisar região R${region.ordinal}</h3>
+    ${sampleCropHtml}
     ${badge}
     <p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion, isRecalibrated))}</strong>. Concordância é evidência técnica, não confiança científica.</p>
     <div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div>
@@ -1383,7 +1520,11 @@ async function startAnalysis(){
     analysisRuns = runs.data || [];
     selectedRegion = currentAnalysis.regions?.[0] || null;
     renderAnalysis();
-    if(selectedRegion) loadHistory(selectedRegion.id);
+    if(selectedRegion) {
+      loadHistory(selectedRegion.id);
+      centerOnRegion(selectedRegion);
+      renderSampleCrop(selectedRegion);
+    }
     fillInspect();
     toast(`${currentAnalysis.regions.length} região(ões) identificadas e modelo treinado via ${strategy}.`);
   }catch(err){ toast(err.message); }
