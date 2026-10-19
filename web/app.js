@@ -469,44 +469,137 @@ async function prepareSegmentationCanvases(force = false) {
     const overlayData = overlayCtx.createImageData(w, h);
     const oPix = overlayData.data;
 
-    const isRootPixel = new Uint8Array(w * h);
+    // 1. Amostragem Supervisionada: Aprender a identidade espectral e biométrica da raiz e do solo
     const regions = currentAnalysis.regions || [];
+    let sumR = 0, sumG = 0, sumB = 0, sumGray = 0, rootPixCount = 0;
+    let sqR = 0, sqG = 0, sqB = 0;
 
+    // Mapa das caixas confirmadas para amostragem inicial
+    const seedMask = new Uint8Array(w * h);
     for (const r of regions) {
       const label = r.review?.label || r.suggestion;
       if (label === 'ROOT') {
-        const x0 = Math.max(0, Math.floor(r.x));
-        const y0 = Math.max(0, Math.floor(r.y));
-        const x1 = Math.min(w, Math.ceil(r.x + r.width));
-        const y1 = Math.min(h, Math.ceil(r.y + r.height));
+        const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
+        const x1 = Math.min(w, Math.ceil(r.x + r.width)), y1 = Math.min(h, Math.ceil(r.y + r.height));
         for (let y = y0; y < y1; y++) {
-          const rowOffset = y * w;
+          const row = y * w;
           for (let x = x0; x < x1; x++) {
-            isRootPixel[rowOffset + x] = 1;
+            seedMask[row + x] = 1;
+            const idx = (row + x) * 4;
+            const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
+            const pGray = 0.299 * pr + 0.587 * pg + 0.114 * pb;
+            sumR += pr; sumG += pg; sumB += pb; sumGray += pGray;
+            sqR += pr * pr; sqG += pg * pg; sqB += pb * pb;
+            rootPixCount++;
           }
         }
       }
     }
 
+    // Amostragem da Matriz de Solo (pixels fora das regiões)
+    let soilSumR = 0, soilSumG = 0, soilSumB = 0, soilCount = 0;
+    let soilSqR = 0, soilSqG = 0, soilSqB = 0;
+    const step = Math.max(1, Math.floor((w * h) / 10000)); // amostragem estratificada
+    for (let i = 0; i < w * h; i += step) {
+      if (!seedMask[i]) {
+        const idx = i * 4;
+        const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
+        soilSumR += pr; soilSumG += pg; soilSumB += pb;
+        soilSqR += pr * pr; soilSqG += pg * pg; soilSqB += pb * pb;
+        soilCount++;
+      }
+    }
+
+    const nRoot = Math.max(1, rootPixCount), nSoil = Math.max(1, soilCount);
+    const meanR = sumR / nRoot, meanG = sumG / nRoot, meanB = sumB / nRoot;
+    const stdR = Math.max(8, Math.sqrt(Math.max(0, sqR / nRoot - meanR * meanR)));
+    const stdG = Math.max(8, Math.sqrt(Math.max(0, sqG / nRoot - meanG * meanG)));
+    const stdB = Math.max(8, Math.sqrt(Math.max(0, sqB / nRoot - meanB * meanB)));
+
+    const sMeanR = soilSumR / nSoil, sMeanG = soilSumG / nSoil, sMeanB = soilSumB / nSoil;
+    const sStdR = Math.max(8, Math.sqrt(Math.max(0, soilSqR / nSoil - sMeanR * sMeanR)));
+    const sStdG = Math.max(8, Math.sqrt(Math.max(0, soilSqG / nSoil - sMeanG * sMeanG)));
+    const sStdB = Math.max(8, Math.sqrt(Math.max(0, soilSqB / nSoil - sMeanB * sMeanB)));
+
+    // 2. Classificação Estatística Densa em TODA a imagem
+    const isRootPixel = new Uint8Array(w * h);
     const total = w * h;
+
     for (let i = 0; i < total; i++) {
       const idx = i * 4;
       const r = src[idx], g = src[idx + 1], b = src[idx + 2];
 
-      if (isRootPixel[i]) {
-        // Raiz: preservada com máxima fidelidade no canal de raízes
+      // Distância estatística de Mahalanobis normalizada à distribuição de raiz
+      const distRoot = Math.sqrt(
+        Math.pow((r - meanR) / stdR, 2) +
+        Math.pow((g - meanG) / stdG, 2) +
+        Math.pow((b - meanB) / stdB, 2)
+      );
+
+      // Distância em relação à distribuição de solo
+      const distSoil = Math.sqrt(
+        Math.pow((r - sMeanR) / sStdR, 2) +
+        Math.pow((g - sMeanG) / sStdG, 2) +
+        Math.pow((b - sMeanB) / sStdB, 2)
+      );
+
+      // Critério de classificação supervisionada por máxima verossimilhança
+      const isSeed = seedMask[i] === 1;
+      const matchesRootModel = (distRoot < 2.3) && (distRoot < distSoil * 1.05);
+
+      if (isSeed || matchesRootModel) {
+        isRootPixel[i] = 1;
+      }
+    }
+
+    // 3. Propagação de Continuidade Morfológica (Conectar eixos e filamentos radiculares contínuos)
+    const refinedMask = new Uint8Array(w * h);
+    for (let y = 1; y < h - 1; y++) {
+      const row = y * w;
+      for (let x = 1; x < w - 1; x++) {
+        const i = row + x;
+        if (isRootPixel[i]) {
+          refinedMask[i] = 1;
+          continue;
+        }
+        // Conexão de filamento: se o pixel estiver cercado por raízes e tiver perfil coerente
+        const neighbors = isRootPixel[i - 1] + isRootPixel[i + 1] + isRootPixel[i - w] + isRootPixel[i + w];
+        if (neighbors >= 2) {
+          const idx = i * 4;
+          const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+          const distRoot = Math.sqrt(Math.pow((r - meanR) / stdR, 2) + Math.pow((g - meanG) / stdG, 2) + Math.pow((b - meanB) / stdB, 2));
+          if (distRoot < 2.9) {
+            refinedMask[i] = 1;
+          }
+        }
+      }
+    }
+
+    // 4. Geração das 4 Camadas Científicas Globais
+    for (let i = 0; i < total; i++) {
+      const idx = i * 4;
+      const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+
+      if (refinedMask[i]) {
+        // Raiz: preserva os pixels reais do sistema radicular em toda a extensão da imagem
         rPix[idx] = r; rPix[idx + 1] = g; rPix[idx + 2] = b; rPix[idx + 3] = 255;
-        // Solo: raiz mascarada/subtraída
-        mPix[idx] = Math.round(r * 0.15); mPix[idx + 1] = Math.round(g * 0.15); mPix[idx + 2] = Math.round(b * 0.15); mPix[idx + 3] = 100;
-        // Binária: branco absoluto (255)
+        // Solo: raiz subtraída/mascarada
+        mPix[idx] = Math.round(sMeanR * 0.4 + r * 0.1);
+        mPix[idx + 1] = Math.round(sMeanG * 0.4 + g * 0.1);
+        mPix[idx + 2] = Math.round(sMeanB * 0.4 + b * 0.1);
+        mPix[idx + 3] = 160;
+        // Binária: branco puro para análise computacional
         bPix[idx] = 255; bPix[idx + 1] = 255; bPix[idx + 2] = 255; bPix[idx + 3] = 255;
-        // Overlay: verde esmeralda translúcido sobre o pixel original
-        oPix[idx] = Math.round(r * 0.4); oPix[idx + 1] = Math.min(255, Math.round(g * 1.4 + 40)); oPix[idx + 2] = Math.round(b * 0.5); oPix[idx + 3] = 255;
+        // Overlay: realce vivo ao longo de toda a arquitetura radicular
+        oPix[idx] = Math.round(r * 0.4);
+        oPix[idx + 1] = Math.min(255, Math.round(g * 1.35 + 45));
+        oPix[idx + 2] = Math.round(b * 0.5);
+        oPix[idx + 3] = 255;
       } else {
-        // Matriz / Solo
+        // Matriz de Solo
         rPix[idx] = 0; rPix[idx + 1] = 0; rPix[idx + 2] = 0; rPix[idx + 3] = 0; // Transparente
-        mPix[idx] = r; mPix[idx + 1] = g; mPix[idx + 2] = b; mPix[idx + 3] = 255; // Solo intacto
-        bPix[idx] = 0; bPix[idx + 1] = 0; bPix[idx + 2] = 0; bPix[idx + 3] = 255; // Preto absoluto (0)
+        mPix[idx] = r; mPix[idx + 1] = g; mPix[idx + 2] = b; mPix[idx + 3] = 255; // Solo original
+        bPix[idx] = 0; bPix[idx + 1] = 0; bPix[idx + 2] = 0; bPix[idx + 3] = 255; // Preto puro
         oPix[idx] = r; oPix[idx + 1] = g; oPix[idx + 2] = b; oPix[idx + 3] = 255; // Foto original
       }
     }
@@ -533,16 +626,33 @@ function applyActiveLayer() {
   const inspectImg = $('inspect-image');
   if (!segLayer) return;
 
+  // Sincronizar classes ativas tanto no topo quanto no painel lateral
+  for (const b of document.querySelectorAll('[data-layer-btn], [data-top-layer]')) {
+    const l = b.dataset.layerBtn || b.dataset.topLayer;
+    b.classList.toggle('active', l === activeLayer);
+  }
+
+  // Camada 1: Original Intacta e Preservada (Sem caixas e sem filtros)
+  if (activeLayer === 'original') {
+    segLayer.classList.add('hidden');
+    if (regionOverlay) regionOverlay.style.display = 'none';
+    if (tileLayer) tileLayer.style.display = 'block';
+    if (inspectImg) inspectImg.style.display = 'block';
+    if ($('pyramid-status')) $('pyramid-status').textContent = '📷 Imagem Original Preservada (Intacta, sem alterações)';
+    return;
+  }
+
+  // Camada de Caixas/Fragmentos de Calibração
   if (activeLayer === 'boxes' || !segCanvases) {
     segLayer.classList.add('hidden');
     if (regionOverlay) regionOverlay.style.display = 'block';
     if (tileLayer) tileLayer.style.display = 'block';
     if (inspectImg) inspectImg.style.display = 'block';
-    if ($('pyramid-status')) $('pyramid-status').textContent = 'Modo de inspeção: Caixas candidatas';
+    if ($('pyramid-status')) $('pyramid-status').textContent = 'Modo de calibração: Fragmentos/Amostras iniciais';
     return;
   }
 
-  // Modos de segmentação: esconde caixas imediatamente!
+  // Camadas de Segmentação Densa de Toda a Imagem (Esconde caixas imediatamente!)
   if (regionOverlay) regionOverlay.style.display = 'none';
 
   segLayer.width = segCanvases.w;
@@ -565,10 +675,12 @@ function applyActiveLayer() {
   }
 
   const layerNames = {
-    roots: '🌿 Somente Raízes Reconhecidas (Isolamento Radicular)',
-    matrix: '🟤 Matriz de Solo (Raízes Subtraídas)',
-    binary: '⬛ Máscara Binária P&B (Padrão ImageJ / RhizoVision)',
-    overlay: '🔍 Sobreposição Nítida (Foto + Raízes)'
+    original: '📷 Imagem Original Preservada (Intacta)',
+    roots: '🌿 Somente Raízes Reconhecidas em Toda a Imagem (Isolamento Radicular)',
+    matrix: '🟤 Matriz de Solo em Toda a Imagem (Raízes Subtraídas)',
+    binary: '⬛ Máscara Binária Científica P&B (Padrão ImageJ / RhizoVision)',
+    overlay: '🔍 Sobreposição Nítida em Toda a Imagem (Foto + Raízes)',
+    boxes: '📦 Fragmentos de Calibração'
   };
   if ($('pyramid-status')) {
     $('pyramid-status').textContent = `Camada Ativa: ${layerNames[activeLayer] || activeLayer}`;
@@ -682,7 +794,8 @@ function renderAnalysis(){
       <p class="segmentation-desc">Aplicação pixel-a-pixel sobre toda a imagem para isolamento fenotípico de raízes e solo.</p>
       
       <div class="layer-selector">
-        <button type="button" class="btn-layer ${activeLayer==='roots'?'active':''}" data-layer-btn="roots" title="Exibe exclusivamente as raízes confirmadas">🌿 Raízes</button>
+        <button type="button" class="btn-layer ${activeLayer==='original'?'active':''}" data-layer-btn="original" title="Exibe a imagem original preservada intacta">📷 Original</button>
+        <button type="button" class="btn-layer ${activeLayer==='roots'?'active':''}" data-layer-btn="roots" title="Exibe exclusivamente as raízes reconhecidas">🌿 Raízes</button>
         <button type="button" class="btn-layer ${activeLayer==='matrix'?'active':''}" data-layer-btn="matrix" title="Exibe a matriz de solo com as raízes subtraídas">🟤 Solo</button>
         <button type="button" class="btn-layer ${activeLayer==='binary'?'active':''}" data-layer-btn="binary" title="Máscara preto e branco padrão ImageJ / RhizoVision">⬛ Máscara P&B</button>
         <button type="button" class="btn-layer ${activeLayer==='overlay'?'active':''}" data-layer-btn="overlay" title="Foto original com raízes destacadas sem caixas">🔍 Sobreposição</button>
@@ -802,11 +915,18 @@ function renderAnalysis(){
   if($('review-form')) $('review-form').onsubmit = (e) => saveReview(e, false);
   if($('btn-next-review')) $('btn-next-review').onclick = (e) => saveReview(e, true);
 
-  // Botões de camada
+  // Botões de camada do painel lateral
   for(const b of panel.querySelectorAll('[data-layer-btn]')){
     b.onclick = () => {
       activeLayer = b.dataset.layerBtn;
-      for(const other of panel.querySelectorAll('[data-layer-btn]')) other.classList.toggle('active', other === b);
+      applyActiveLayer();
+    };
+  }
+
+  // Botões de camada da barra superior
+  for(const b of document.querySelectorAll('[data-top-layer]')){
+    b.onclick = () => {
+      activeLayer = b.dataset.topLayer;
       applyActiveLayer();
     };
   }
