@@ -489,20 +489,156 @@ static std::string analysis_json(const App& app,const std::string& image_id,cons
  )
  LEFT JOIN review_events e ON e.region_id=r.id AND e.version=r.current_version
  WHERE r.run_id=? ORDER BY r.ordinal)SQL");regions.bind(1,run_id);bool first=true;
+ int total_count=0,root_count=0,matrix_count=0,artifact_count=0,unknown_count=0,reviewed_count=0;
+ std::int64_t total_root_area=0,total_region_area=0;
  while(sqlite3_step(regions.p)==SQLITE_ROW){
   if(!first)out<<',';
   first=false;
+  total_count++;
+  const auto area=sqlite3_column_int64(regions.p,6);
+  total_region_area+=area;
+  const std::string rev_act=col(regions.p,10),rev_lbl=col(regions.p,11),sugg_lbl=col(regions.p,9);
+  const std::string final_lbl=rev_lbl.empty()?sugg_lbl:rev_lbl;
+  if(!rev_act.empty())reviewed_count++;
+  if(final_lbl=="ROOT"){root_count++;total_root_area+=area;}
+  else if(final_lbl=="MATRIX")matrix_count++;
+  else if(final_lbl=="ARTIFACT")artifact_count++;
+  else unknown_count++;
+
   const std::string jev=col(regions.p,14);
   out<<"{\"id\":"<<q(col(regions.p,0))<<",\"ordinal\":"<<sqlite3_column_int(regions.p,1)
      <<",\"x\":"<<sqlite3_column_int64(regions.p,2)<<",\"y\":"<<sqlite3_column_int64(regions.p,3)
      <<",\"width\":"<<sqlite3_column_int64(regions.p,4)<<",\"height\":"<<sqlite3_column_int64(regions.p,5)
-     <<",\"area\":"<<sqlite3_column_int64(regions.p,6)<<",\"evidence\":"<<col(regions.p,7)
-     <<",\"version\":"<<sqlite3_column_int(regions.p,8)<<",\"suggestion\":"<<q(col(regions.p,9))
+     <<",\"area\":"<<area<<",\"evidence\":"<<col(regions.p,7)
+     <<",\"version\":"<<sqlite3_column_int(regions.p,8)<<",\"suggestion\":"<<q(sugg_lbl)
      <<",\"judgment_evidence\":"<<(jev.empty()?"{}":jev)<<",\"review\":";
-  if(col(regions.p,10).empty())out<<"null";else out<<"{\"action\":"<<q(col(regions.p,10))<<",\"label\":"<<q(col(regions.p,11))<<",\"justification\":"<<q(col(regions.p,12))<<",\"created_at\":"<<q(col(regions.p,13))<<"}";
+  if(rev_act.empty())out<<"null";else out<<"{\"action\":"<<q(rev_act)<<",\"label\":"<<q(rev_lbl)<<",\"justification\":"<<q(col(regions.p,12))<<",\"created_at\":"<<q(col(regions.p,13))<<"}";
   out<<'}';
  }
- out<<"]}}";return out.str();
+ out<<"],\"statistics\":{"
+    <<"\"total_regions\":"<<total_count
+    <<",\"root_count\":"<<root_count
+    <<",\"matrix_count\":"<<matrix_count
+    <<",\"artifact_count\":"<<artifact_count
+    <<",\"unknown_count\":"<<unknown_count
+    <<",\"reviewed_count\":"<<reviewed_count
+    <<",\"pending_count\":"<<(total_count-reviewed_count)
+    <<",\"total_root_area\":"<<total_root_area
+    <<",\"total_region_area\":"<<total_region_area
+    <<"}}}";
+ return out.str();
+}
+
+static std::string analysis_export_csv(const App& app,const std::string& image_id,const std::string& user_id,const std::string& requested_run=""){
+ Db db(app.root/"rizoma.sqlite3");
+ Stmt img(db.p,"SELECT filename,sample_id,capture_date,width,height,sha256,format FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");
+ img.bind(1,image_id);img.bind(2,user_id);
+ if(sqlite3_step(img.p)!=SQLITE_ROW)throw Failure("Image not found");
+
+ const std::string filename=col(img.p,0),sample_id=col(img.p,1),capture_date=col(img.p,2);
+ const auto width=sqlite3_column_int64(img.p,3),height=sqlite3_column_int64(img.p,4);
+ const std::string sha256=col(img.p,5),format=col(img.p,6);
+ const auto total_img_area=width*height;
+
+ const std::string query=requested_run.empty()
+  ?"SELECT id,algorithm,algorithm_version,status,created_at,completed_at,COALESCE(notes,'') FROM analysis_runs WHERE image_id=? AND deleted_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 1"
+  :"SELECT id,algorithm,algorithm_version,status,created_at,completed_at,COALESCE(notes,'') FROM analysis_runs WHERE image_id=? AND id=? AND deleted_at IS NULL";
+ Stmt run(db.p,query.c_str());run.bind(1,image_id);if(!requested_run.empty())run.bind(2,requested_run);
+ if(sqlite3_step(run.p)!=SQLITE_ROW)throw Failure("Analysis not found");
+
+ const std::string run_id=col(run.p,0),algo=col(run.p,1),algo_ver=col(run.p,2);
+ const std::string status=col(run.p,3),created_at=col(run.p,4),completed_at=col(run.p,5),notes=col(run.p,6);
+
+ Stmt regions(db.p,R"SQL(SELECT r.ordinal,r.x,r.y,r.width,r.height,r.area,
+  j.label,COALESCE(e.label,''),COALESCE(e.action,''),COALESCE(e.justification,''),
+  COALESCE(e.created_at,''),COALESCE(u.email,''),j.evidence_json
+ FROM analysis_regions r
+ JOIN analysis_judgments j ON j.id = (
+   SELECT j2.id FROM analysis_judgments j2
+   WHERE j2.region_id=r.id AND j2.actor_type='ALGORITHM'
+   ORDER BY j2.created_at DESC, j2.rowid DESC LIMIT 1
+ )
+ LEFT JOIN review_events e ON e.region_id=r.id AND e.version=r.current_version
+ LEFT JOIN users u ON u.id=e.reviewer_user_id
+ WHERE r.run_id=? ORDER BY r.ordinal)SQL");
+ regions.bind(1,run_id);
+
+ struct CsvRow {
+  int ordinal;
+  std::int64_t x,y,w,h,area;
+  std::string algo_label,final_label,action,justification,review_at,reviewer;
+  double confidence;
+ };
+ std::vector<CsvRow> rows;
+ int root_count=0,matrix_count=0,artifact_count=0,unknown_count=0,reviewed_count=0;
+ std::int64_t total_root_area=0,total_region_area=0;
+
+ while(sqlite3_step(regions.p)==SQLITE_ROW){
+  CsvRow row;
+  row.ordinal=sqlite3_column_int(regions.p,0);
+  row.x=sqlite3_column_int64(regions.p,1);
+  row.y=sqlite3_column_int64(regions.p,2);
+  row.w=sqlite3_column_int64(regions.p,3);
+  row.h=sqlite3_column_int64(regions.p,4);
+  row.area=sqlite3_column_int64(regions.p,5);
+  row.algo_label=col(regions.p,6);
+  std::string rev_label=col(regions.p,7);
+  row.action=col(regions.p,8);
+  row.justification=col(regions.p,9);
+  row.review_at=col(regions.p,10);
+  row.reviewer=col(regions.p,11);
+  row.final_label=rev_label.empty()?row.algo_label:rev_label;
+
+  std::string jev=col(regions.p,12);
+  row.confidence=0.0;
+  auto pos=jev.find("\"confidence\":");
+  if(pos!=std::string::npos){
+   try{row.confidence=std::stod(jev.substr(pos+13));}catch(...){}
+  }
+
+  if(!row.action.empty())reviewed_count++;
+  if(row.final_label=="ROOT"){root_count++;total_root_area+=row.area;}
+  else if(row.final_label=="MATRIX")matrix_count++;
+  else if(row.final_label=="ARTIFACT")artifact_count++;
+  else unknown_count++;
+  total_region_area+=row.area;
+
+  rows.push_back(std::move(row));
+ }
+
+ const double density_pct = total_img_area > 0 ? (double(total_root_area) / double(total_img_area)) * 100.0 : 0.0;
+ const double root_coverage_of_regions = total_region_area > 0 ? (double(total_root_area) / double(total_region_area)) * 100.0 : 0.0;
+
+ std::ostringstream out;
+ out<<"# RIZOMA - Relatorio Cientifico e Estatisticas Radiculares\r\n"
+    <<"# Amostra,"<<csv_cell(sample_id)<<"\r\n"
+    <<"# Arquivo,"<<csv_cell(filename)<<"\r\n"
+    <<"# Formato,"<<format<<",Largura,"<<width<<",Altura,"<<height<<",Area Total Imagem (px),"<<total_img_area<<"\r\n"
+    <<"# SHA-256,"<<sha256<<"\r\n"
+    <<"# Algoritmo,"<<csv_cell(algo)<<",Versao,"<<csv_cell(algo_ver)<<"\r\n"
+    <<"# Status Analise,"<<status<<",Data Execucao,"<<created_at<<",Data Conclusao,"<<completed_at<<"\r\n"
+    <<"# Notas,"<<csv_cell(notes)<<"\r\n"
+    <<"# \r\n"
+    <<"# SUMARIO ESTATISTICO RADICULAR:\r\n"
+    <<"# Total Regioes Analisadas,"<<rows.size()<<"\r\n"
+    <<"# Regioes ROOT (Raizes),"<<root_count<<"\r\n"
+    <<"# Regioes MATRIX (Solo/Matriz),"<<matrix_count<<"\r\n"
+    <<"# Regioes ARTIFACT (Pedras/Artefatos),"<<artifact_count<<"\r\n"
+    <<"# Regioes UNKNOWN (Desconhecidas),"<<unknown_count<<"\r\n"
+    <<"# Regioes com Revisao Humana,"<<reviewed_count<<" ("<<(rows.empty()?0:(reviewed_count*100/rows.size()))<<"%)\r\n"
+    <<"# Area Total de Raizes (px),"<<total_root_area<<"\r\n"
+    <<"# Densidade Radicular (% area da imagem),"<<std::fixed<<std::setprecision(3)<<density_pct<<"%\r\n"
+    <<"# Proporcao de Raizes sobre Regioes Detectadas,"<<std::fixed<<std::setprecision(2)<<root_coverage_of_regions<<"%\r\n"
+    <<"# \r\n"
+    <<"ordinal,x,y,width,height,area_pixels,label,confidence,status_revisao,revisor,justificativa,data_revisao\r\n";
+
+ for(const auto& r : rows){
+  out<<r.ordinal<<","<<r.x<<","<<r.y<<","<<r.w<<","<<r.h<<","<<r.area<<","
+     <<csv_cell(r.final_label)<<","<<std::fixed<<std::setprecision(2)<<r.confidence<<","
+     <<(r.action.empty()?"AUTOMATICO":r.action)<<","
+     <<csv_cell(r.reviewer)<<","<<csv_cell(r.justification)<<","<<r.review_at<<"\r\n";
+ }
+ return out.str();
 }
 
 static std::string analysis_runs_json(const App& app,const std::string& image_id,const std::string& user_id){
@@ -1004,6 +1140,11 @@ static Response handle(const App& app,const http::request<http::string_body>& re
      try{
       if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));
       if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));
+      if(kind=="analysis-export"||kind=="analysis-export.csv"){
+       auto r=respond(http::status::ok,v,analysis_export_csv(app,id,user->id,args["run_id"]),"text/csv; charset=utf-8");
+       r.set(http::field::content_disposition,"attachment; filename=\"rizoma-analise-"+id+".csv\"");
+       return r;
+      }
       if(kind=="pyramid")return respond(http::status::ok,v,pyramid_manifest(app,id,user->id));
       if(kind.starts_with("tiles/")){std::string mime;auto tile=pyramid_tile(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(tile),mime);}
       if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){

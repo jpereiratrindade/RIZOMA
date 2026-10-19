@@ -121,5 +121,23 @@
 .notes-edit-form{display:grid;gap:6px;margin-top:6px}
 .notes-edit-form textarea{width:100%;min-height:50px;border:1px solid #c7d8e3;border-radius:6px;padding:6px;font-size:.76rem;color:var(--ink);resize:vertical}
 .notes-edit-buttons{display:flex;justify-content:flex-end;gap:6px}
+/* Statistics Summary Card & Export Actions */
+.stats-summary-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:12px 0 10px;box-shadow:0 2px 8px #0c284408;border-top:3px solid var(--teal)}
+.stats-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.stats-card-head span{font-size:.65rem;font-weight:900;letter-spacing:.12em;color:var(--teal);text-transform:uppercase}
+.stats-card-head strong{font-size:.82rem;color:var(--navy)}
+.stats-metrics-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-mini{background:#f8fbfd;border:1px solid #e1ecf3;border-radius:7px;padding:8px 10px;display:flex;flex-direction:column}
+.stat-mini-label{font-size:.68rem;font-weight:750;color:var(--muted);display:flex;align-items:center;gap:4px}
+.stat-mini-val{font-size:1.15rem;font-weight:850;color:var(--navy);line-height:1.2;margin:2px 0}
+.stat-mini small{font-size:.65rem;color:#7a8e9e}
+.export-actions-group{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0 14px}
+.btn-export-png,.btn-export-csv{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 12px;border-radius:8px;font-size:.76rem;font-weight:800;text-align:center;text-decoration:none;transition:transform .12s,background .12s,box-shadow .12s;cursor:pointer;border:0}
+.btn-export-png{background:linear-gradient(135deg,#13806c,#0c594c);color:#fff;box-shadow:0 3px 10px #13806c33}
+.btn-export-png:hover:not(:disabled){background:linear-gradient(135deg,#17947d,#106959);transform:translateY(-1px);box-shadow:0 5px 14px #13806c44}
+.btn-export-png:disabled{opacity:.6;cursor:wait}
+.btn-export-csv{background:#fff;border:1.5px solid #bdd2e2;color:var(--navy);box-shadow:0 2px 6px #0c28440a}
+.btn-export-csv:hover{background:#f0f6fa;border-color:var(--blue);color:var(--blue);transform:translateY(-1px)}
+
 
 

@@ -529,6 +529,18 @@ def main():
             status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={fresh_run_id}',headers=restarted_headers1)
             an_data = json.loads(body)['data']
             assert all(r['review'] is not None and r['review']['action']=='CONFIRM' for r in an_data['regions'])
+            stats = an_data['statistics']
+            assert stats['total_regions'] == len(an_data['regions'])
+            assert stats['pending_count'] == 0
+            assert stats['reviewed_count'] == stats['total_regions']
+
+            # Test Analysis Statistics CSV export
+            status,csv_body,csv_headers = req(base+f'/api/v1/images/{analysis_image_id}/analysis-export.csv?run_id={fresh_run_id}',headers=restarted_headers1)
+            assert status == 200, (status, csv_body)
+            assert b'RIZOMA - Relatorio Cientifico e Estatisticas Radiculares' in csv_body
+            assert b'SUMARIO ESTATISTICO RADICULAR:' in csv_body
+            assert b'Densidade Radicular' in csv_body
+            assert b'ordinal,x,y,width,height,area_pixels,label' in csv_body
 
             # Soft Delete Analysis Run
             status,body,_=req(base+'/api/v1/analysis-runs/'+first_run_id,'DELETE',headers=restarted_headers1)

@@ -97,8 +97,9 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/pyramid` | Metadados do esquema e níveis da pirâmide multirresolução |
 | `GET` | `/api/v1/images/{id}/tiles/{level}/{x}/{y}.png` | Mosaico PNG (tile 256×256) sob demanda com isolamento por usuário |
 | `GET` | `/api/v1/export/manifest.csv` | Manifesto de metadados do acervo do usuário (requer autenticação) |
-| `POST/GET` | `/api/v1/images/{id}/analysis` | Executa (com `?algorithm=BAYESIAN_CALIBRATED`, `TABULAR_INCREMENTAL`, `VISUAL_KNN` ou `BASELINE_HEURISTIC`) ou recupera a análise e suas regiões |
+| `POST/GET` | `/api/v1/images/{id}/analysis` | Executa (com `?algorithm=BAYESIAN_CALIBRATED`, `TABULAR_INCREMENTAL`, `VISUAL_KNN` ou `BASELINE_HEURISTIC`) ou recupera a análise com regiões e métricas estatísticas |
 | `GET` | `/api/v1/images/{id}/analysis-runs` | Lista execuções preservadas da imagem |
+| `GET` | `/api/v1/images/{id}/analysis-export.csv` | Exporta relatório científico RFC-4180 em CSV com sumário estatístico radicular e dados de regiões |
 | `PATCH` | `/api/v1/analysis-runs/{id}` | Atualiza status (`COMPLETED`, `ARCHIVED`, `REVIEW_REQUIRED`) e notas científicas da análise |
 | `DELETE` | `/api/v1/analysis-runs/{id}` | Soft delete da execução de análise com registro de auditoria |
 | `POST` | `/api/v1/analysis-runs/{id}/confirm-all` | Confirmação em lote de todas as regiões pendentes de uma análise |

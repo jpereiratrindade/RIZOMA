@@ -443,6 +443,69 @@ function renderAnalysis(){
     <div class="notes-content">${currentAnalysis.notes ? h(currentAnalysis.notes) : '<span class="notes-empty">Nenhuma observação registrada nesta análise.</span>'}</div>
   `;
 
+  const stats = currentAnalysis.statistics || (() => {
+    let root_count = 0, matrix_count = 0, artifact_count = 0, unknown_count = 0, reviewed_count = 0;
+    let total_root_area = 0, total_region_area = 0;
+    for (const r of regions) {
+      const finalLabel = r.review?.label || r.suggestion;
+      if (r.review) reviewed_count++;
+      if (finalLabel === 'ROOT') { root_count++; total_root_area += (r.area || 0); }
+      else if (finalLabel === 'MATRIX') matrix_count++;
+      else if (finalLabel === 'ARTIFACT') artifact_count++;
+      else unknown_count++;
+      total_region_area += (r.area || 0);
+    }
+    return {
+      total_regions: regions.length,
+      root_count, matrix_count, artifact_count, unknown_count,
+      reviewed_count, pending_count: regions.length - reviewed_count,
+      total_root_area, total_region_area
+    };
+  })();
+
+  const imgArea = (current?.width && current?.height) ? (current.width * current.height) : 0;
+  const densityPct = imgArea > 0 ? ((stats.total_root_area / imgArea) * 100) : 0;
+  const revPct = stats.total_regions > 0 ? Math.round((stats.reviewed_count / stats.total_regions) * 100) : 0;
+
+  const statsHtml = `
+    <div class="stats-summary-card">
+      <div class="stats-card-head">
+        <span>SUMÁRIO ESTATÍSTICO</span>
+        <strong>Estatísticas Radiculares</strong>
+      </div>
+      <div class="stats-metrics-grid">
+        <div class="stat-mini">
+          <span class="stat-mini-label">🌱 Raízes</span>
+          <strong class="stat-mini-val">${stats.root_count}</strong>
+          <small>${number.format(stats.total_root_area)} px²</small>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">📐 Densidade</span>
+          <strong class="stat-mini-val">${densityPct.toFixed(3)}%</strong>
+          <small>área da imagem</small>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">⚖️ Solo / Artefatos</span>
+          <strong class="stat-mini-val">${stats.matrix_count} / ${stats.artifact_count}</strong>
+          <small>estruturas</small>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">🎯 Revisão</span>
+          <strong class="stat-mini-val">${revPct}%</strong>
+          <small>${stats.reviewed_count}/${stats.total_regions} concluídas</small>
+        </div>
+      </div>
+    </div>
+    <div class="export-actions-group">
+      <button type="button" class="btn-export-png" id="btn-export-classified-img" title="Baixar imagem com overlay colorido e rodapé científico de calibração">
+        🖼 Baixar Imagem (.PNG)
+      </button>
+      <a href="/api/v1/images/${encodeURIComponent(current.id)}/analysis-export.csv?run_id=${encodeURIComponent(currentAnalysis.id)}" download="rizoma-analise-${encodeURIComponent(current.sample_id || current.id)}.csv" class="btn-export-csv" id="btn-export-stats-csv" title="Download de estatísticas e relatório RFC-4180 em CSV para R/Pandas/Excel">
+        📊 Relatório (.CSV)
+      </a>
+    </div>
+  `;
+
   panel.innerHTML = `<div class="analysis-head">
       <div>
         <span class="section-kicker">ANÁLISE EXPERIMENTAL</span>
@@ -462,6 +525,7 @@ function renderAnalysis(){
       <button type="button" class="btn-action-small danger" id="btn-delete-analysis" title="Excluir execução de análise">🗑 Excluir análise</button>
     </div>
     ${regions.filter(r => !r.review).length > 0 ? `<button type="button" class="button primary full" id="btn-batch-confirm" style="margin:8px 0 10px;background:linear-gradient(135deg,var(--teal),var(--blue));font-size:0.82rem;padding:9px 12px">⚡ Confirmar todas pendentes (${regions.filter(r => !r.review).length})</button>` : (regions.length > 0 ? `<div style="background:#eaf7f2;color:#116e4b;border:1px solid #b7e6cf;padding:6px 10px;border-radius:6px;font-size:0.75rem;font-weight:700;margin:8px 0;display:flex;align-items:center;gap:6px">✓ Todas as ${regions.length} regiões confirmadas!</div>` : '')}
+    ${statsHtml}
     <div class="analysis-notes-block">
       <div class="notes-header">
         <span>Notas científicas</span>
@@ -495,12 +559,145 @@ function renderAnalysis(){
   if($('btn-archive-analysis')) $('btn-archive-analysis').onclick = () => setAnalysisStatus('ARCHIVED');
   if($('btn-delete-analysis')) $('btn-delete-analysis').onclick = () => openDeleteAnalysisModal();
   if($('btn-batch-confirm')) $('btn-batch-confirm').onclick = () => openBatchConfirmModal();
+  if($('btn-export-classified-img')) $('btn-export-classified-img').onclick = () => exportClassifiedImage();
   if($('btn-edit-notes')) $('btn-edit-notes').onclick = () => { editingNotes = true; renderAnalysis(); };
   if($('btn-cancel-notes')) $('btn-cancel-notes').onclick = () => { editingNotes = false; renderAnalysis(); };
   if($('notes-form')) $('notes-form').onsubmit = (e) => {
     e.preventDefault();
     saveAnalysisNotes($('notes-textarea').value.trim());
   };
+}
+
+async function exportClassifiedImage(){
+  if(!current || !currentAnalysis) return;
+  const btn = $('btn-export-classified-img');
+  if(btn) btn.disabled = true;
+  toast('Processando exportação da imagem classificada em alta resolução...');
+
+  try {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Falha ao obter os dados visuais da imagem'));
+      img.src = `/api/v1/images/${encodeURIComponent(current.id)}/original-view`;
+    });
+
+    const w = img.naturalWidth || current.width || 1200;
+    const h = img.naturalHeight || current.height || 1200;
+    const scale = Math.max(1, Math.min(w, h) / 1200);
+    const bannerH = Math.max(90, Math.round(75 * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h + bannerH;
+    const ctx = canvas.getContext('2d');
+
+    // 1. Imagem base original
+    ctx.drawImage(img, 0, 0, w, h);
+
+    // 2. Sobreposição de regiões classificadas
+    const regions = currentAnalysis.regions || [];
+    for (const r of regions) {
+      const finalLabel = r.review?.label || r.suggestion;
+      let strokeColor = '#5c8ba6', fillColor = 'rgba(92,139,166,0.22)', badgeBg = '#223c4f';
+      if (finalLabel === 'ROOT') {
+        strokeColor = '#20b68a';
+        fillColor = 'rgba(32,182,138,0.25)';
+        badgeBg = '#0e4a36';
+      } else if (finalLabel === 'MATRIX') {
+        strokeColor = '#e6a817';
+        fillColor = 'rgba(230,168,23,0.22)';
+        badgeBg = '#543c08';
+      } else if (finalLabel === 'ARTIFACT') {
+        strokeColor = '#e05638';
+        fillColor = 'rgba(224,86,56,0.25)';
+        badgeBg = '#4e1b12';
+      }
+
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(r.x, r.y, r.width, r.height);
+
+      ctx.lineWidth = Math.max(2, Math.round(2.5 * scale));
+      ctx.strokeStyle = strokeColor;
+      ctx.strokeRect(r.x, r.y, r.width, r.height);
+
+      const labelText = `R${r.ordinal} · ${finalLabel}`;
+      const fontSize = Math.max(12, Math.round(14 * scale));
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      const textWidth = ctx.measureText(labelText).width;
+      const padX = 6 * scale, padY = 3 * scale;
+      const badgeH = fontSize + (padY * 2);
+      const badgeW = textWidth + (padX * 2);
+
+      let badgeX = r.x;
+      let badgeY = r.y - badgeH - 2;
+      if (badgeY < 2) badgeY = r.y + 2;
+
+      ctx.fillStyle = badgeBg;
+      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 1 * scale;
+      ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(labelText, badgeX + padX, badgeY + (badgeH / 2));
+    }
+
+    // 3. Rodapé científico com sumário estatístico
+    ctx.fillStyle = '#0a1d2e';
+    ctx.fillRect(0, h, w, bannerH);
+
+    ctx.strokeStyle = '#20b68a';
+    ctx.lineWidth = Math.max(3, Math.round(3.5 * scale));
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    ctx.lineTo(w, h);
+    ctx.stroke();
+
+    const titleSize = Math.max(14, Math.round(17 * scale));
+    const subSize = Math.max(11, Math.round(13 * scale));
+    ctx.textBaseline = 'top';
+
+    ctx.fillStyle = '#45c8f5';
+    ctx.font = `bold ${titleSize}px sans-serif`;
+    ctx.fillText('RIZOMA · Análise Radicular Computacional', 20 * scale, h + (12 * scale));
+
+    ctx.fillStyle = '#eaf2f8';
+    ctx.font = `${subSize}px sans-serif`;
+    const meta1 = `Amostra: ${current.sample_id || 'N/A'} | Arquivo: ${current.filename} | Resolução: ${w}x${h} px | SHA-256: ${(current.sha256||'').slice(0, 16)}…`;
+    ctx.fillText(meta1, 20 * scale, h + (12 * scale) + titleSize + (5 * scale));
+
+    const stats = currentAnalysis.statistics || {};
+    const densPct = (w * h) > 0 && stats.total_root_area ? ((stats.total_root_area / (w * h)) * 100).toFixed(3) : '0.000';
+    ctx.fillStyle = '#2de4ad';
+    ctx.font = `bold ${subSize}px sans-serif`;
+    const meta2 = `Raízes: ${stats.root_count || 0} (${number.format(stats.total_root_area || 0)} px² · ${densPct}%) | Solo: ${stats.matrix_count || 0} | Artefatos: ${stats.artifact_count || 0} | Revisão: ${stats.reviewed_count || 0}/${stats.total_regions || regions.length}`;
+    ctx.fillText(meta2, 20 * scale, h + (12 * scale) + titleSize + subSize + (10 * scale));
+
+    canvas.toBlob((blob) => {
+      if(!blob){
+        toast('Erro ao converter imagem classificada.');
+        if(btn) btn.disabled = false;
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `rizoma-classificada-${current.sample_id || current.id}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('Imagem classificada exportada com sucesso!');
+      if(btn) btn.disabled = false;
+    }, 'image/png');
+
+  } catch(err) {
+    toast('Erro na exportação: ' + err.message);
+    if(btn) btn.disabled = false;
+  }
 }
 
 async function setAnalysisStatus(newStatus){
