@@ -419,6 +419,111 @@ let activeLayer = 'roots'; // 'roots' | 'matrix' | 'binary' | 'overlay' | 'boxes
 let segCanvases = null;
 let segGenerating = false;
 let segCurrentRunId = null;
+let segSensitivity = 2.3;
+let segScaleWidthCm = 20.0;
+let segModelStats = null;
+
+function recomputeSegmentation(sensitivity = segSensitivity) {
+  if (!segModelStats) return;
+  const { src, w, h, seedMask, meanR, meanG, meanB, stdR, stdG, stdB, sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
+          rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas, rootsCtx, matrixCtx, binaryCtx, overlayCtx,
+          rootsData, matrixData, binaryData, overlayData } = segModelStats;
+
+  const rPix = rootsData.data, mPix = matrixData.data, bPix = binaryData.data, oPix = overlayData.data;
+  const isRootPixel = new Uint8Array(w * h);
+  const total = w * h;
+
+  for (let i = 0; i < total; i++) {
+    const idx = i * 4;
+    const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+    const distRoot = Math.sqrt(
+      Math.pow((r - meanR) / stdR, 2) +
+      Math.pow((g - meanG) / stdG, 2) +
+      Math.pow((b - meanB) / stdB, 2)
+    );
+    const distSoil = Math.sqrt(
+      Math.pow((r - sMeanR) / sStdR, 2) +
+      Math.pow((g - sMeanG) / sStdG, 2) +
+      Math.pow((b - sMeanB) / sStdB, 2)
+    );
+
+    const isSeed = seedMask[i] === 1;
+    const matchesRootModel = (distRoot < sensitivity) && (distRoot < distSoil * 1.05);
+    if (isSeed || matchesRootModel) {
+      isRootPixel[i] = 1;
+    }
+  }
+
+  // Morfologia de continuidade (conectar filamentos)
+  const refinedMask = new Uint8Array(w * h);
+  let totalRootPx = 0;
+  for (let y = 1; y < h - 1; y++) {
+    const row = y * w;
+    for (let x = 1; x < w - 1; x++) {
+      const i = row + x;
+      if (isRootPixel[i]) {
+        refinedMask[i] = 1;
+        totalRootPx++;
+        continue;
+      }
+      const neighbors = isRootPixel[i - 1] + isRootPixel[i + 1] + isRootPixel[i - w] + isRootPixel[i + w];
+      if (neighbors >= 2) {
+        const idx = i * 4;
+        const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+        const distRoot = Math.sqrt(Math.pow((r - meanR) / stdR, 2) + Math.pow((g - meanG) / stdG, 2) + Math.pow((b - meanB) / stdB, 2));
+        if (distRoot < sensitivity + 0.6) {
+          refinedMask[i] = 1;
+          totalRootPx++;
+        }
+      }
+    }
+  }
+
+  // Montagem das 4 camadas científicas globais
+  for (let i = 0; i < total; i++) {
+    const idx = i * 4;
+    const r = src[idx], g = src[idx + 1], b = src[idx + 2];
+    if (refinedMask[i]) {
+      rPix[idx] = r; rPix[idx + 1] = g; rPix[idx + 2] = b; rPix[idx + 3] = 255;
+      mPix[idx] = Math.round(sMeanR * 0.4 + r * 0.1);
+      mPix[idx + 1] = Math.round(sMeanG * 0.4 + g * 0.1);
+      mPix[idx + 2] = Math.round(sMeanB * 0.4 + b * 0.1);
+      mPix[idx + 3] = 160;
+      bPix[idx] = 255; bPix[idx + 1] = 255; bPix[idx + 2] = 255; bPix[idx + 3] = 255;
+      oPix[idx] = Math.round(r * 0.4);
+      oPix[idx + 1] = Math.min(255, Math.round(g * 1.35 + 45));
+      oPix[idx + 2] = Math.round(b * 0.5);
+      oPix[idx + 3] = 255;
+    } else {
+      rPix[idx] = 0; rPix[idx + 1] = 0; rPix[idx + 2] = 0; rPix[idx + 3] = 0;
+      mPix[idx] = r; mPix[idx + 1] = g; mPix[idx + 2] = b; mPix[idx + 3] = 255;
+      bPix[idx] = 0; bPix[idx + 1] = 0; bPix[idx + 2] = 0; bPix[idx + 3] = 255;
+      oPix[idx] = r; oPix[idx + 1] = g; oPix[idx + 2] = b; oPix[idx + 3] = 255;
+    }
+  }
+
+  rootsCtx.putImageData(rootsData, 0, 0);
+  matrixCtx.putImageData(matrixData, 0, 0);
+  binaryCtx.putImageData(binaryData, 0, 0);
+  overlayCtx.putImageData(overlayData, 0, 0);
+
+  const pxPerCm = w / segScaleWidthCm;
+  const rootLengthCm = (totalRootPx / (pxPerCm * 2.5)).toFixed(1);
+  const faceAreaCm2 = segScaleWidthCm * (h / pxPerCm);
+  const rootDensityCmCm2 = (rootLengthCm / Math.max(1, faceAreaCm2)).toFixed(2);
+
+  segCanvases = {
+    roots: rootsCanvas, matrix: matrixCanvas, binary: binaryCanvas, overlay: overlayCanvas,
+    w, h, totalRootPx, rootLengthCm, rootDensityCmCm2
+  };
+  segCurrentRunId = currentAnalysis ? currentAnalysis.id : null;
+
+  if ($('scale-density-val')) {
+    $('scale-density-val').textContent = `${rootLengthCm} cm (${rootDensityCmCm2} cm/cm²)`;
+  }
+
+  applyActiveLayer();
+}
 
 async function prepareSegmentationCanvases(force = false) {
   if (!current || !currentAnalysis) return;
@@ -449,32 +554,27 @@ async function prepareSegmentationCanvases(force = false) {
     rootsCanvas.width = w; rootsCanvas.height = h;
     const rootsCtx = rootsCanvas.getContext('2d');
     const rootsData = rootsCtx.createImageData(w, h);
-    const rPix = rootsData.data;
 
     const matrixCanvas = document.createElement('canvas');
     matrixCanvas.width = w; matrixCanvas.height = h;
     const matrixCtx = matrixCanvas.getContext('2d');
     const matrixData = matrixCtx.createImageData(w, h);
-    const mPix = matrixData.data;
 
     const binaryCanvas = document.createElement('canvas');
     binaryCanvas.width = w; binaryCanvas.height = h;
     const binaryCtx = binaryCanvas.getContext('2d');
     const binaryData = binaryCtx.createImageData(w, h);
-    const bPix = binaryData.data;
 
     const overlayCanvas = document.createElement('canvas');
     overlayCanvas.width = w; overlayCanvas.height = h;
     const overlayCtx = overlayCanvas.getContext('2d');
     const overlayData = overlayCtx.createImageData(w, h);
-    const oPix = overlayData.data;
 
-    // 1. Amostragem Supervisionada: Aprender a identidade espectral e biométrica da raiz e do solo
+    // 1. Amostragem Supervisionada: Aprender a identidade espectral da raiz e do solo
     const regions = currentAnalysis.regions || [];
     let sumR = 0, sumG = 0, sumB = 0, sumGray = 0, rootPixCount = 0;
     let sqR = 0, sqG = 0, sqB = 0;
 
-    // Mapa das caixas confirmadas para amostragem inicial
     const seedMask = new Uint8Array(w * h);
     for (const r of regions) {
       const label = r.review?.label || r.suggestion;
@@ -496,10 +596,9 @@ async function prepareSegmentationCanvases(force = false) {
       }
     }
 
-    // Amostragem da Matriz de Solo (pixels fora das regiões)
     let soilSumR = 0, soilSumG = 0, soilSumB = 0, soilCount = 0;
     let soilSqR = 0, soilSqG = 0, soilSqB = 0;
-    const step = Math.max(1, Math.floor((w * h) / 10000)); // amostragem estratificada
+    const step = Math.max(1, Math.floor((w * h) / 10000));
     for (let i = 0; i < w * h; i += step) {
       if (!seedMask[i]) {
         const idx = i * 4;
@@ -521,97 +620,16 @@ async function prepareSegmentationCanvases(force = false) {
     const sStdG = Math.max(8, Math.sqrt(Math.max(0, soilSqG / nSoil - sMeanG * sMeanG)));
     const sStdB = Math.max(8, Math.sqrt(Math.max(0, soilSqB / nSoil - sMeanB * sMeanB)));
 
-    // 2. Classificação Estatística Densa em TODA a imagem
-    const isRootPixel = new Uint8Array(w * h);
-    const total = w * h;
+    segModelStats = {
+      src, w, h, seedMask,
+      meanR, meanG, meanB, stdR, stdG, stdB,
+      sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
+      rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas,
+      rootsCtx, matrixCtx, binaryCtx, overlayCtx,
+      rootsData, matrixData, binaryData, overlayData
+    };
 
-    for (let i = 0; i < total; i++) {
-      const idx = i * 4;
-      const r = src[idx], g = src[idx + 1], b = src[idx + 2];
-
-      // Distância estatística de Mahalanobis normalizada à distribuição de raiz
-      const distRoot = Math.sqrt(
-        Math.pow((r - meanR) / stdR, 2) +
-        Math.pow((g - meanG) / stdG, 2) +
-        Math.pow((b - meanB) / stdB, 2)
-      );
-
-      // Distância em relação à distribuição de solo
-      const distSoil = Math.sqrt(
-        Math.pow((r - sMeanR) / sStdR, 2) +
-        Math.pow((g - sMeanG) / sStdG, 2) +
-        Math.pow((b - sMeanB) / sStdB, 2)
-      );
-
-      // Critério de classificação supervisionada por máxima verossimilhança
-      const isSeed = seedMask[i] === 1;
-      const matchesRootModel = (distRoot < 2.3) && (distRoot < distSoil * 1.05);
-
-      if (isSeed || matchesRootModel) {
-        isRootPixel[i] = 1;
-      }
-    }
-
-    // 3. Propagação de Continuidade Morfológica (Conectar eixos e filamentos radiculares contínuos)
-    const refinedMask = new Uint8Array(w * h);
-    for (let y = 1; y < h - 1; y++) {
-      const row = y * w;
-      for (let x = 1; x < w - 1; x++) {
-        const i = row + x;
-        if (isRootPixel[i]) {
-          refinedMask[i] = 1;
-          continue;
-        }
-        // Conexão de filamento: se o pixel estiver cercado por raízes e tiver perfil coerente
-        const neighbors = isRootPixel[i - 1] + isRootPixel[i + 1] + isRootPixel[i - w] + isRootPixel[i + w];
-        if (neighbors >= 2) {
-          const idx = i * 4;
-          const r = src[idx], g = src[idx + 1], b = src[idx + 2];
-          const distRoot = Math.sqrt(Math.pow((r - meanR) / stdR, 2) + Math.pow((g - meanG) / stdG, 2) + Math.pow((b - meanB) / stdB, 2));
-          if (distRoot < 2.9) {
-            refinedMask[i] = 1;
-          }
-        }
-      }
-    }
-
-    // 4. Geração das 4 Camadas Científicas Globais
-    for (let i = 0; i < total; i++) {
-      const idx = i * 4;
-      const r = src[idx], g = src[idx + 1], b = src[idx + 2];
-
-      if (refinedMask[i]) {
-        // Raiz: preserva os pixels reais do sistema radicular em toda a extensão da imagem
-        rPix[idx] = r; rPix[idx + 1] = g; rPix[idx + 2] = b; rPix[idx + 3] = 255;
-        // Solo: raiz subtraída/mascarada
-        mPix[idx] = Math.round(sMeanR * 0.4 + r * 0.1);
-        mPix[idx + 1] = Math.round(sMeanG * 0.4 + g * 0.1);
-        mPix[idx + 2] = Math.round(sMeanB * 0.4 + b * 0.1);
-        mPix[idx + 3] = 160;
-        // Binária: branco puro para análise computacional
-        bPix[idx] = 255; bPix[idx + 1] = 255; bPix[idx + 2] = 255; bPix[idx + 3] = 255;
-        // Overlay: realce vivo ao longo de toda a arquitetura radicular
-        oPix[idx] = Math.round(r * 0.4);
-        oPix[idx + 1] = Math.min(255, Math.round(g * 1.35 + 45));
-        oPix[idx + 2] = Math.round(b * 0.5);
-        oPix[idx + 3] = 255;
-      } else {
-        // Matriz de Solo
-        rPix[idx] = 0; rPix[idx + 1] = 0; rPix[idx + 2] = 0; rPix[idx + 3] = 0; // Transparente
-        mPix[idx] = r; mPix[idx + 1] = g; mPix[idx + 2] = b; mPix[idx + 3] = 255; // Solo original
-        bPix[idx] = 0; bPix[idx + 1] = 0; bPix[idx + 2] = 0; bPix[idx + 3] = 255; // Preto puro
-        oPix[idx] = r; oPix[idx + 1] = g; oPix[idx + 2] = b; oPix[idx + 3] = 255; // Foto original
-      }
-    }
-
-    rootsCtx.putImageData(rootsData, 0, 0);
-    matrixCtx.putImageData(matrixData, 0, 0);
-    binaryCtx.putImageData(binaryData, 0, 0);
-    overlayCtx.putImageData(overlayData, 0, 0);
-
-    segCanvases = { roots: rootsCanvas, matrix: matrixCanvas, binary: binaryCanvas, overlay: overlayCanvas, w, h };
-    segCurrentRunId = currentAnalysis.id;
-    applyActiveLayer();
+    recomputeSegmentation(segSensitivity);
   } catch (err) {
     console.error('Falha ao processar segmentação:', err);
   } finally {
@@ -730,11 +748,77 @@ async function validateFinalAnalysis(){
 
 function renderAnalysis(){
   const panel = $('analysis-panel'), overlay = $('region-overlay');
+  const topLayerGroup = $('layer-segmented-top');
+  const topStartBtn = $('start-analysis');
+
   if(!currentAnalysis){
+    if (topLayerGroup) topLayerGroup.classList.add('hidden');
+    if (topStartBtn) topStartBtn.textContent = '⚡ Analisar experimentalmente';
     overlay.innerHTML = '';
-    panel.innerHTML = `<div class="analysis-empty"><strong>Análise ainda não executada</strong><p>Execute o baseline experimental sobre o original preservado. O processamento atual é em memória e restrito ao domínio de ingestão desta versão.</p></div>`;
+    panel.innerHTML = `
+      <div class="analysis-empty-card">
+        <div class="empty-badge">PREPARAÇÃO CIENTÍFICA</div>
+        <h3>Iniciar Processamento e Análise</h3>
+        <p>A imagem do monolito está preservada em formato original intacto com verificação criptográfica SHA-256. Execute a análise para identificar amostras de calibração e treinar o modelo de segmentação densa de toda a imagem.</p>
+        
+        <div class="analysis-config-box">
+          <label class="config-label" for="analysis-strategy-empty">
+            <span style="font-size:0.73rem;font-weight:750;color:var(--navy)">Estratégia de Aprendizado:</span>
+            <select id="analysis-strategy-empty" class="select-strategy-panel">
+              <option value="BAYESIAN_CALIBRATED" selected>Nível 1: Calibração Bayesiana (Recomendado)</option>
+              <option value="TABULAR_INCREMENTAL">Nível 2: Classificador Tabular (Online ML)</option>
+              <option value="VISUAL_KNN">Nível 3: Similaridade Visual k-NN &amp; Active Learning</option>
+              <option value="BASELINE_HEURISTIC">Baseline Heurístico (Estático)</option>
+            </select>
+          </label>
+
+          <div class="analysis-feature-list">
+            <div class="feat-item">
+              <span class="feat-icon">🔬</span>
+              <div>
+                <strong>Amostragem Inteligente</strong>
+                <small>Detecta eixos radiculares e matriz de solo para treinamento</small>
+              </div>
+            </div>
+            <div class="feat-item">
+              <span class="feat-icon">🌱</span>
+              <div>
+                <strong>Classificação Pixel-a-Pixel</strong>
+                <small>Aprende o perfil estatístico e gera as camadas de raízes, solo e máscara</small>
+              </div>
+            </div>
+            <div class="feat-item">
+              <span class="feat-icon">🔒</span>
+              <div>
+                <strong>Custódia Criptográfica</strong>
+                <small>O arquivo original nunca é alterado ou sobrescrito</small>
+              </div>
+            </div>
+          </div>
+
+          <button type="button" class="button primary full btn-start-hero" id="btn-start-analysis-empty">
+            ⚡ Executar Análise e Treinar Modelo
+          </button>
+        </div>
+      </div>
+    `;
+
+    const btnEmpty = $('btn-start-analysis-empty');
+    if (btnEmpty) {
+      btnEmpty.onclick = () => {
+        const stratSelect = $('analysis-strategy-empty');
+        if (stratSelect && $('analysis-strategy')) {
+          $('analysis-strategy').value = stratSelect.value;
+        }
+        startAnalysis();
+      };
+    }
     return;
   }
+
+  if (topLayerGroup) topLayerGroup.classList.remove('hidden');
+  if (topStartBtn) topStartBtn.textContent = '↻ Re-analisar';
+
   const regions = currentAnalysis.regions || [];
   overlay.innerHTML = regions.map(r => {
     const isRecal = !r.review && r.judgment_evidence?.recalibrated;
@@ -799,11 +883,31 @@ function renderAnalysis(){
         <button type="button" class="btn-layer ${activeLayer==='matrix'?'active':''}" data-layer-btn="matrix" title="Exibe a matriz de solo com as raízes subtraídas">🟤 Solo</button>
         <button type="button" class="btn-layer ${activeLayer==='binary'?'active':''}" data-layer-btn="binary" title="Máscara preto e branco padrão ImageJ / RhizoVision">⬛ Máscara P&B</button>
         <button type="button" class="btn-layer ${activeLayer==='overlay'?'active':''}" data-layer-btn="overlay" title="Foto original com raízes destacadas sem caixas">🔍 Sobreposição</button>
-        <button type="button" class="btn-layer ${activeLayer==='boxes'?'active':''}" data-layer-btn="boxes" title="Visualizar caixas de depuração">📦 Caixas</button>
+        <button type="button" class="btn-layer ${activeLayer==='boxes'?'active':''}" data-layer-btn="boxes" title="Visualizar caixas de calibração">📦 Caixas</button>
+      </div>
+
+      <div class="sensitivity-control">
+        <div class="sens-header">
+          <span>Sensibilidade do Modelo:</span>
+          <strong id="sens-val">${segSensitivity.toFixed(1)}x</strong>
+        </div>
+        <input type="range" id="sens-slider" min="1.0" max="4.0" step="0.1" value="${segSensitivity.toFixed(1)}" title="Ajuste fino de sensibilidade radicular">
+        <small class="sens-hint">Ajusta em tempo real a detecção de ramificações finas vs. matriz de solo.</small>
+      </div>
+
+      <div class="scale-control">
+        <div class="scale-row">
+          <label for="scale-cm"><span>Largura do Monolito:</span></label>
+          <div><input type="number" id="scale-cm" min="1" max="500" value="${segScaleWidthCm}" step="0.5"> <small>cm</small></div>
+        </div>
+        <div class="scale-result">
+          <span>Comprimento e Densidade:</span>
+          <strong id="scale-density-val">${segCanvases?.rootLengthCm ? `${segCanvases.rootLengthCm} cm (${segCanvases.rootDensityCmCm2} cm/cm²)` : 'Calculando…'}</strong>
+        </div>
       </div>
 
       <div class="layer-downloads">
-        <span class="layer-down-title">Exportar imagens individuais:</span>
+        <span class="layer-down-title">Exportar camadas e máscaras:</span>
         <div class="down-btn-grid">
           <button type="button" class="btn-down" id="dl-roots-png" title="Download da imagem contendo exclusivamente as raízes">🌿 Raízes (.PNG)</button>
           <button type="button" class="btn-down" id="dl-matrix-png" title="Download da imagem da matriz de solo">🟤 Solo (.PNG)</button>
@@ -928,6 +1032,22 @@ function renderAnalysis(){
     b.onclick = () => {
       activeLayer = b.dataset.topLayer;
       applyActiveLayer();
+    };
+  }
+
+  // Controles interativos de sensibilidade e escala
+  if($('sens-slider')){
+    $('sens-slider').oninput = e => {
+      segSensitivity = parseFloat(e.target.value);
+      if($('sens-val')) $('sens-val').textContent = `${segSensitivity.toFixed(1)}x`;
+      recomputeSegmentation(segSensitivity);
+    };
+  }
+
+  if($('scale-cm')){
+    $('scale-cm').onchange = e => {
+      segScaleWidthCm = Math.max(1, parseFloat(e.target.value) || 20);
+      recomputeSegmentation(segSensitivity);
     };
   }
 
@@ -1251,15 +1371,25 @@ async function loadHistory(regionId){
 
 async function startAnalysis(){
   if(!current) return;
-  const button = $('start-analysis'); button.disabled = true; button.textContent = 'Analisando…';
-  const strategy = $('analysis-strategy')?.value || 'BAYESIAN_CALIBRATED';
+  const button = $('start-analysis');
+  const emptyBtn = $('btn-start-analysis-empty');
+  if(button){ button.disabled = true; button.textContent = 'Analisando…'; }
+  if(emptyBtn){ emptyBtn.disabled = true; emptyBtn.textContent = 'Analisando e treinando modelo…'; }
+  const strategy = $('analysis-strategy')?.value || $('analysis-strategy-empty')?.value || 'BAYESIAN_CALIBRATED';
   try{
     const result = await api(`/api/v1/images/${current.id}/analysis?algorithm=${encodeURIComponent(strategy)}`, {method:'POST'});
-    currentAnalysis = result.data; const runs=await api(`/api/v1/images/${current.id}/analysis-runs`);analysisRuns=runs.data||[];selectedRegion = currentAnalysis.regions?.[0] || null; renderAnalysis();
+    currentAnalysis = result.data;
+    const runs = await api(`/api/v1/images/${current.id}/analysis-runs`);
+    analysisRuns = runs.data || [];
+    selectedRegion = currentAnalysis.regions?.[0] || null;
+    renderAnalysis();
     if(selectedRegion) loadHistory(selectedRegion.id);
-    fillInspect(); toast(`${currentAnalysis.regions.length} região(ões) registrada(s) via ${strategy}.`);
+    fillInspect();
+    toast(`${currentAnalysis.regions.length} região(ões) identificadas e modelo treinado via ${strategy}.`);
   }catch(err){ toast(err.message); }
-  finally{ button.disabled = false; button.textContent = 'Executar nova análise'; }
+  finally{
+    if(button){ button.disabled = false; button.textContent = '↻ Re-analisar'; }
+  }
 }
 
 async function saveReview(event, advanceNext = false){
