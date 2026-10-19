@@ -580,6 +580,70 @@ static std::string delete_analysis_run(const App& app,const std::string& run_id,
  return "{\"data\":{\"id\":"+q(run_id)+",\"image_id\":"+q(image_id)+",\"deleted\":true,\"deleted_at\":"+q(now)+"}}";
 }
 
+static std::string confirm_all_reviews(const App& app,const std::string& run_id,const std::string& user_id,const std::string& body){
+ Db db(app.root/"rizoma.sqlite3");
+ std::string justification=body.empty()?"":json_extract_string(body,"justification");
+ if(justification.empty())justification="Aprovação em lote por inspeção visual global";
+ if(justification.size()>1000)throw Failure("Justification too long");
+
+ sql(db.p,"BEGIN IMMEDIATE");
+ try{
+  Stmt auth(db.p,R"SQL(
+   SELECT a.id FROM analysis_runs a
+   JOIN images i ON i.id=a.image_id
+   WHERE a.id=? AND i.user_id=? AND a.deleted_at IS NULL AND i.deleted_at IS NULL
+  )SQL");
+  auth.bind(1,run_id);auth.bind(2,user_id);
+  if(sqlite3_step(auth.p)!=SQLITE_ROW)throw Failure("Analysis run not found");
+
+  Stmt pend(db.p,R"SQL(
+   SELECT r.id, r.current_version, COALESCE(e.label, j.label)
+   FROM analysis_regions r
+   JOIN analysis_judgments j ON j.id = (
+     SELECT j2.id FROM analysis_judgments j2
+     WHERE j2.region_id=r.id AND j2.actor_type='ALGORITHM'
+     ORDER BY j2.created_at DESC, j2.rowid DESC LIMIT 1
+   )
+   LEFT JOIN review_events e ON e.region_id=r.id AND e.version=r.current_version
+   WHERE r.run_id=? AND e.id IS NULL
+   ORDER BY r.ordinal
+  )SQL");
+  pend.bind(1,run_id);
+
+  struct PendingReg { std::string id; int version; std::string label; };
+  std::vector<PendingReg> to_confirm;
+  while(sqlite3_step(pend.p)==SQLITE_ROW){
+   to_confirm.push_back({col(pend.p,0),sqlite3_column_int(pend.p,1),col(pend.p,2)});
+  }
+
+  const std::string now=utc_offset(0);
+  int confirmed_count=0;
+  for(const auto& reg:to_confirm){
+   const int next_ver=reg.version+1;
+   const std::string ev_id=rand_id();
+   Stmt ins_ev(db.p,"INSERT INTO review_events(id,region_id,reviewer_user_id,version,action,label,justification,created_at) VALUES(?,?,?,?,?,?,?,?)");
+   ins_ev.bind(1,ev_id);ins_ev.bind(2,reg.id);ins_ev.bind(3,user_id);sqlite3_bind_int(ins_ev.p,4,next_ver);
+   ins_ev.bind(5,"CONFIRM");ins_ev.bind(6,reg.label);ins_ev.bind(7,justification);ins_ev.bind(8,now);
+   if(sqlite3_step(ins_ev.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
+
+   Stmt upd_r(db.p,"UPDATE analysis_regions SET current_version=? WHERE id=? AND current_version=?");
+   sqlite3_bind_int(upd_r.p,1,next_ver);upd_r.bind(2,reg.id);sqlite3_bind_int(upd_r.p,3,reg.version);
+   if(sqlite3_step(upd_r.p)!=SQLITE_DONE||sqlite3_changes(db.p)!=1)throw Failure("Review conflict during batch confirmation");
+
+   confirmed_count++;
+  }
+
+  Stmt log(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(NULL,'BATCH_CONFIRM',?,?)");
+  log.bind(1,now);log.bind(2,"Confirmed "+std::to_string(confirmed_count)+" regions for run "+run_id);
+  sqlite3_step(log.p);
+
+  sql(db.p,"COMMIT");
+  std::ostringstream out;
+  out<<"{\"status\":\"ok\",\"confirmed_count\":"<<confirmed_count<<"}";
+  return out.str();
+ }catch(...){sql(db.p,"ROLLBACK");throw;}
+}
+
 static std::string start_analysis(const App& app,const std::string& image_id,const std::string& user_id,const std::string& algo_req=""){
  Db db(app.root/"rizoma.sqlite3");
  Stmt image(db.p,"SELECT original_path,format,sha256,width,height FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");image.bind(1,image_id);image.bind(2,user_id);
@@ -878,15 +942,23 @@ static Response handle(const App& app,const http::request<http::string_body>& re
   if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app,user->id));
   if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app,user->id),"text/csv; charset=utf-8");
   if(p.starts_with("/api/v1/analysis-runs/")){
-   std::string run_id=p.substr(std::string("/api/v1/analysis-runs/").size());
+   std::string rem=p.substr(std::string("/api/v1/analysis-runs/").size());
+   auto slash=rem.find('/');
+   auto run_id=rem.substr(0,slash);
    if(!valid_id(run_id))return problem(v,http::status::bad_request,"Invalid run identifier");
    try{
-    if(req.method()==http::verb::patch){
-     if(req[http::field::content_type].find("application/json")!=0)return problem(v,http::status::unsupported_media_type,"Use application/json");
-     return respond(http::status::ok,v,update_analysis_run(app,run_id,user->id,req.body()));
-    }
-    if(req.method()==http::verb::delete_){
-     return respond(http::status::ok,v,delete_analysis_run(app,run_id,user->id));
+    if(slash==std::string::npos){
+     if(req.method()==http::verb::patch){
+      if(req[http::field::content_type].find("application/json")!=0)return problem(v,http::status::unsupported_media_type,"Use application/json");
+      return respond(http::status::ok,v,update_analysis_run(app,run_id,user->id,req.body()));
+     }
+     if(req.method()==http::verb::delete_){
+      return respond(http::status::ok,v,delete_analysis_run(app,run_id,user->id));
+     }
+    }else if(rem.substr(slash+1)=="confirm-all"){
+     if(req.method()==http::verb::post){
+      return respond(http::status::ok,v,confirm_all_reviews(app,run_id,user->id,req.body()));
+     }
     }
    }catch(const Failure& e){
     std::string msg=e.what();

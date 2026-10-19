@@ -101,6 +101,7 @@ Variáveis de ambiente opcionais para disparo de e-mail corporativo:
 | `GET` | `/api/v1/images/{id}/analysis-runs` | Lista execuções preservadas da imagem |
 | `PATCH` | `/api/v1/analysis-runs/{id}` | Atualiza status (`COMPLETED`, `ARCHIVED`, `REVIEW_REQUIRED`) e notas científicas da análise |
 | `DELETE` | `/api/v1/analysis-runs/{id}` | Soft delete da execução de análise com registro de auditoria |
+| `POST` | `/api/v1/analysis-runs/{id}/confirm-all` | Confirmação em lote de todas as regiões pendentes de uma análise |
 | `POST/GET` | `/api/v1/analysis-regions/{id}/reviews` | Registra ou recupera o histórico humano da região |
 
 Parâmetros opcionais de upload: `filename`, `sample_id`, `capture_date` (ISO `YYYY-MM-DD`). Exemplo autenticado:

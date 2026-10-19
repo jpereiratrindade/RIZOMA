@@ -461,6 +461,7 @@ function renderAnalysis(){
       ${st !== 'ARCHIVED' ? `<button type="button" class="btn-action-small" id="btn-archive-analysis" title="Arquivar análise">⊘ Arquivar</button>` : ''}
       <button type="button" class="btn-action-small danger" id="btn-delete-analysis" title="Excluir execução de análise">🗑 Excluir análise</button>
     </div>
+    ${regions.filter(r => !r.review).length > 0 ? `<button type="button" class="button primary full" id="btn-batch-confirm" style="margin:8px 0 10px;background:linear-gradient(135deg,var(--teal),var(--blue));font-size:0.82rem;padding:9px 12px">⚡ Confirmar todas pendentes (${regions.filter(r => !r.review).length})</button>` : (regions.length > 0 ? `<div style="background:#eaf7f2;color:#116e4b;border:1px solid #b7e6cf;padding:6px 10px;border-radius:6px;font-size:0.75rem;font-weight:700;margin:8px 0;display:flex;align-items:center;gap:6px">✓ Todas as ${regions.length} regiões confirmadas!</div>` : '')}
     <div class="analysis-notes-block">
       <div class="notes-header">
         <span>Notas científicas</span>
@@ -493,6 +494,7 @@ function renderAnalysis(){
   if($('btn-complete-analysis')) $('btn-complete-analysis').onclick = () => setAnalysisStatus('COMPLETED');
   if($('btn-archive-analysis')) $('btn-archive-analysis').onclick = () => setAnalysisStatus('ARCHIVED');
   if($('btn-delete-analysis')) $('btn-delete-analysis').onclick = () => openDeleteAnalysisModal();
+  if($('btn-batch-confirm')) $('btn-batch-confirm').onclick = () => openBatchConfirmModal();
   if($('btn-edit-notes')) $('btn-edit-notes').onclick = () => { editingNotes = true; renderAnalysis(); };
   if($('btn-cancel-notes')) $('btn-cancel-notes').onclick = () => { editingNotes = false; renderAnalysis(); };
   if($('notes-form')) $('notes-form').onsubmit = (e) => {
@@ -560,6 +562,37 @@ async function confirmDeleteAnalysis(){
     }
     toast('Execução de análise excluída.');
   }catch(err){ toast(err.message); }
+}
+
+function openBatchConfirmModal(){
+  if(!currentAnalysis) return;
+  const pending = (currentAnalysis.regions || []).filter(r => !r.review);
+  if(!pending.length){ toast('Todas as regiões já foram revisadas!'); return; }
+  $('batch-confirm-count').textContent = pending.length;
+  $('batch-confirm-modal').classList.remove('hidden');
+}
+
+function closeBatchConfirmModal(){
+  $('batch-confirm-modal').classList.add('hidden');
+}
+
+async function submitBatchConfirm(e){
+  if(e && e.preventDefault) e.preventDefault();
+  if(!currentAnalysis) return;
+  const justification = $('batch-confirm-justification').value.trim();
+  const btn = $('btn-submit-batch-confirm');
+  btn.disabled = true; btn.textContent = 'Confirmando…';
+  try{
+    const res = await api(`/api/v1/analysis-runs/${currentAnalysis.id}/confirm-all`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({justification})
+    });
+    closeBatchConfirmModal();
+    toast(`${res.confirmed_count} região(ões) confirmada(s) em lote com sucesso!`);
+    await loadAnalysisRun(currentAnalysis.id);
+  }catch(err){ toast(err.message); }
+  finally{ btn.disabled = false; btn.textContent = 'Confirmar todas em lote ⚡'; }
 }
 
 function reviewEditor(region){
@@ -643,6 +676,7 @@ function closeInspect(){
   closeEditImageModal();
   closeDeleteImageModal();
   closeDeleteAnalysisModal();
+  closeBatchConfirmModal();
   if($('auth-overlay').classList.contains('hidden')){
     document.body.style.overflow = '';
   }
@@ -878,6 +912,10 @@ $('btn-confirm-delete-image').onclick = confirmDeleteImage;
 $('close-delete-analysis').onclick = closeDeleteAnalysisModal;
 $('btn-cancel-delete-analysis').onclick = closeDeleteAnalysisModal;
 $('btn-confirm-delete-analysis').onclick = confirmDeleteAnalysis;
+
+$('close-batch-confirm').onclick = closeBatchConfirmModal;
+$('btn-cancel-batch-confirm').onclick = closeBatchConfirmModal;
+$('batch-confirm-form').onsubmit = submitBatchConfirm;
 
 // Previne o zoom acidental da pagina inteira pelo navegador via Ctrl + Roda do mouse
 window.addEventListener('wheel', e => { if(e.ctrlKey) e.preventDefault(); }, { passive: false });
