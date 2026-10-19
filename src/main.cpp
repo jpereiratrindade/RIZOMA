@@ -282,7 +282,7 @@ static std::string row_json(sqlite3_stmt* st){std::ostringstream o;o<<"{\"id\":"
 constexpr const char* fields="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,brightness,qc_state,pipeline,user_email,user_id";
 static std::string all_images(const App& app,const std::string& user_id){
  Db d(app.root/"rizoma.sqlite3");
- auto stm=std::string("SELECT ")+fields+" FROM images WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 500";
+ auto stm=std::string("SELECT ")+fields+" FROM images WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 500";
  Stmt st(d.p,stm.c_str());
  st.bind(1,user_id);
  std::string out="{\"schema\":\"rizoma.images.v0.2.0\",\"data\":[";
@@ -293,17 +293,70 @@ static std::string all_images(const App& app,const std::string& user_id){
 }
 static std::string one_image(const App& app,const std::string& id,const std::string& user_id){
  Db d(app.root/"rizoma.sqlite3");
- auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=? AND user_id=?";
+ auto stm=std::string("SELECT ")+fields+" FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL";
  Stmt st(d.p,stm.c_str());
  st.bind(1,id);
  st.bind(2,user_id);
  if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
  return "{\"data\":"+row_json(st.p)+"}";
 }
+static std::string update_image_metadata(const App& app,const std::string& id,const std::string& user_id,const std::string& body){
+ const std::string filename=json_extract_string(body,"filename");
+ const std::string sample_id=json_extract_string(body,"sample_id");
+ const std::string capture_date=json_extract_string(body,"capture_date");
+ if(!sample_id.empty()&&!sample_ok(sample_id))throw Failure("Invalid sample identifier");
+ if(!capture_date.empty()&&!date_ok(capture_date))throw Failure("Invalid capture date");
+
+ Db db(app.root/"rizoma.sqlite3");
+ Stmt check(db.p,"SELECT filename,sample_id,capture_date FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");
+ check.bind(1,id);check.bind(2,user_id);
+ if(sqlite3_step(check.p)!=SQLITE_ROW)throw Failure("Image not found");
+
+ const std::string new_fn=filename.empty()?col(check.p,0):safe_filename(filename);
+ const std::string new_sample=sample_id.empty()?col(check.p,1):sample_id;
+ const std::string new_date=capture_date.empty()?col(check.p,2):capture_date;
+
+ sql(db.p,"BEGIN IMMEDIATE");try{
+  Stmt update(db.p,"UPDATE images SET filename=?, sample_id=?, capture_date=? WHERE id=? AND user_id=? AND deleted_at IS NULL");
+  update.bind(1,new_fn);update.bind(2,new_sample);update.bind(3,new_date);update.bind(4,id);update.bind(5,user_id);
+  if(sqlite3_step(update.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
+
+  Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_METADATA_UPDATED',?,?)");
+  ev.bind(1,id);ev.bind(2,utc_offset(0));ev.bind(3,"filename="+new_fn+" | sample_id="+new_sample+" | capture_date="+new_date);
+  sqlite3_step(ev.p);
+  sql(db.p,"COMMIT");
+ }catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+
+ return one_image(app,id,user_id);
+}
+static std::string delete_image(const App& app,const std::string& id,const std::string& user_id){
+ Db db(app.root/"rizoma.sqlite3");
+ Stmt check(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");
+ check.bind(1,id);check.bind(2,user_id);
+ if(sqlite3_step(check.p)!=SQLITE_ROW)throw Failure("Image not found");
+
+ const std::string now=utc_offset(0);
+ sql(db.p,"BEGIN IMMEDIATE");try{
+  Stmt update(db.p,"UPDATE images SET deleted_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL");
+  update.bind(1,now);update.bind(2,id);update.bind(3,user_id);
+  if(sqlite3_step(update.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
+
+  Stmt upd_runs(db.p,"UPDATE analysis_runs SET deleted_at=? WHERE image_id=? AND deleted_at IS NULL");
+  upd_runs.bind(1,now);upd_runs.bind(2,id);
+  sqlite3_step(upd_runs.p);
+
+  Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'IMAGE_SOFT_DELETED',?,?)");
+  ev.bind(1,id);ev.bind(2,now);ev.bind(3,"deleted_by_user="+user_id);
+  sqlite3_step(ev.p);
+  sql(db.p,"COMMIT");
+ }catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+
+ return "{\"data\":{\"id\":"+q(id)+",\"deleted\":true,\"deleted_at\":"+q(now)+"}}";
+}
 static std::string csv_cell(const std::string& s){std::string x=s;if(!x.empty()&&(x[0]=='='||x[0]=='+'||x[0]=='-'||x[0]=='@'))x="'"+x;std::string out="\"";for(char c:x){if(c=='"')out+="\"\"";else if(c!='\r'&&c!='\n')out+=c;}return out+"\"";}
 static std::string manifest(const App& app,const std::string& user_id){
  Db d(app.root/"rizoma.sqlite3");
- Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email FROM images WHERE user_id=? ORDER BY created_at DESC");
+ Stmt st(d.p,"SELECT id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email FROM images WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at DESC");
  st.bind(1,user_id);
  std::string r="id,filename,sample_id,capture_date,created_at,sha256,bytes,width,height,format,qc_state,pipeline,user_email,scientific_status\r\n";
  while(sqlite3_step(st.p)==SQLITE_ROW){
@@ -316,7 +369,7 @@ static std::string manifest(const App& app,const std::string& user_id){
  return r;
 }
 static std::string media(const App& app,const std::string& id,const std::string& kind,std::string& mime,const std::string& user_id){
- Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format,width,height FROM images WHERE id=? AND user_id=?");
+ Db d(app.root/"rizoma.sqlite3");Stmt st(d.p,"SELECT original_path,preview_path,grayscale_path,format,width,height FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");
  st.bind(1,id);
  st.bind(2,user_id);
  if(sqlite3_step(st.p)!=SQLITE_ROW)throw Failure("Image not found");
@@ -352,7 +405,7 @@ static std::string media(const App& app,const std::string& id,const std::string&
 }
 struct AuthorizedImage{std::string original_path,format;std::uint64_t width=0,height=0;};
 static AuthorizedImage authorized_image(const App& app,const std::string& id,const std::string& user_id){
- Db db(app.root/"rizoma.sqlite3");Stmt image(db.p,"SELECT original_path,format,width,height FROM images WHERE id=? AND user_id=?");image.bind(1,id);image.bind(2,user_id);
+ Db db(app.root/"rizoma.sqlite3");Stmt image(db.p,"SELECT original_path,format,width,height FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");image.bind(1,id);image.bind(2,user_id);
  if(sqlite3_step(image.p)!=SQLITE_ROW)throw Failure("Image not found");
  return {col(image.p,0),col(image.p,1),static_cast<std::uint64_t>(sqlite3_column_int64(image.p,2)),static_cast<std::uint64_t>(sqlite3_column_int64(image.p,3))};
 }
@@ -386,7 +439,7 @@ static Ingested ingest_file(const App& app,const fs::path& staged,const std::str
  std::ifstream header(staged,std::ios::binary);std::string signature(8,'\0');header.read(signature.data(),signature.size());signature.resize(static_cast<std::size_t>(header.gcount()));
  const auto fmt=detect_format(signature),hash=hash256_file(staged);
  Db db(app.root/"rizoma.sqlite3");{
-  Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=? AND user_id=?");
+  Stmt lookup(db.p,"SELECT id FROM images WHERE sha256=? AND user_id=? AND deleted_at IS NULL");
   lookup.bind(1,hash);
   lookup.bind(2,user_id);
   if(sqlite3_step(lookup.p)==SQLITE_ROW)throw Failure("An identical original is already registered in your collection (SHA-256 duplicate)");
@@ -415,17 +468,17 @@ constexpr const char* ANALYSIS_PARAMS="{\"global_sigma\":1.2,\"local_sigma\":1.4
 
 static std::string analysis_json(const App& app,const std::string& image_id,const std::string& user_id,const std::string& requested_run=""){
  Db db(app.root/"rizoma.sqlite3");
- Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=?");owned.bind(1,image_id);owned.bind(2,user_id);
+ Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");owned.bind(1,image_id);owned.bind(2,user_id);
  if(sqlite3_step(owned.p)!=SQLITE_ROW)throw Failure("Image not found");
  const std::string query=requested_run.empty()
-  ?"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at FROM analysis_runs WHERE image_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1"
-  :"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at FROM analysis_runs WHERE image_id=? AND id=?";
+  ?"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at,COALESCE(notes,'') FROM analysis_runs WHERE image_id=? AND deleted_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 1"
+  :"SELECT id,algorithm,algorithm_version,parameters_json,source_sha256,status,created_at,completed_at,COALESCE(notes,'') FROM analysis_runs WHERE image_id=? AND id=? AND deleted_at IS NULL";
  Stmt run(db.p,query.c_str());run.bind(1,image_id);if(!requested_run.empty())run.bind(2,requested_run);
  if(sqlite3_step(run.p)!=SQLITE_ROW)return "{\"data\":null}";
  const std::string run_id=col(run.p,0);std::ostringstream out;
  out<<"{\"data\":{\"id\":"<<q(run_id)<<",\"algorithm\":"<<q(col(run.p,1))<<",\"algorithm_version\":"<<q(col(run.p,2))
     <<",\"parameters\":"<<col(run.p,3)<<",\"source_sha256\":"<<q(col(run.p,4))<<",\"status\":"<<q(col(run.p,5))
-    <<",\"created_at\":"<<q(col(run.p,6))<<",\"completed_at\":"<<q(col(run.p,7))<<",\"regions\":[";
+    <<",\"created_at\":"<<q(col(run.p,6))<<",\"completed_at\":"<<q(col(run.p,7))<<",\"notes\":"<<q(col(run.p,8))<<",\"regions\":[";
  Stmt regions(db.p,R"SQL(SELECT r.id,r.ordinal,r.x,r.y,r.width,r.height,r.area,r.evidence_json,r.current_version,
   j.label,COALESCE(e.action,''),COALESCE(e.label,''),COALESCE(e.justification,''),COALESCE(e.created_at,''),j.evidence_json
  FROM analysis_regions r
@@ -453,17 +506,83 @@ static std::string analysis_json(const App& app,const std::string& image_id,cons
 }
 
 static std::string analysis_runs_json(const App& app,const std::string& image_id,const std::string& user_id){
- Db db(app.root/"rizoma.sqlite3");Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=?");owned.bind(1,image_id);owned.bind(2,user_id);
+ Db db(app.root/"rizoma.sqlite3");Stmt owned(db.p,"SELECT 1 FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");owned.bind(1,image_id);owned.bind(2,user_id);
  if(sqlite3_step(owned.p)!=SQLITE_ROW)throw Failure("Image not found");
- Stmt runs(db.p,R"SQL(SELECT a.id,a.algorithm_version,a.status,a.created_at,a.completed_at,COUNT(r.id)
- FROM analysis_runs a LEFT JOIN analysis_regions r ON r.run_id=a.id WHERE a.image_id=?
+ Stmt runs(db.p,R"SQL(SELECT a.id,a.algorithm_version,a.status,a.created_at,a.completed_at,COUNT(r.id),COALESCE(a.notes,'')
+ FROM analysis_runs a LEFT JOIN analysis_regions r ON r.run_id=a.id WHERE a.image_id=? AND a.deleted_at IS NULL
  GROUP BY a.id ORDER BY a.created_at DESC,a.rowid DESC)SQL");runs.bind(1,image_id);
- std::string out="{\"data\":[";bool first=true;while(sqlite3_step(runs.p)==SQLITE_ROW){if(!first)out+=',';first=false;out+="{\"id\":"+q(col(runs.p,0))+",\"algorithm_version\":"+q(col(runs.p,1))+",\"status\":"+q(col(runs.p,2))+",\"created_at\":"+q(col(runs.p,3))+",\"completed_at\":"+q(col(runs.p,4))+",\"region_count\":"+std::to_string(sqlite3_column_int64(runs.p,5))+"}";}return out+"]}";
+ std::string out="{\"data\":[";bool first=true;while(sqlite3_step(runs.p)==SQLITE_ROW){if(!first)out+=',';first=false;out+="{\"id\":"+q(col(runs.p,0))+",\"algorithm_version\":"+q(col(runs.p,1))+",\"status\":"+q(col(runs.p,2))+",\"created_at\":"+q(col(runs.p,3))+",\"completed_at\":"+q(col(runs.p,4))+",\"region_count\":"+std::to_string(sqlite3_column_int64(runs.p,5))+",\"notes\":"+q(col(runs.p,6))+"}";}return out+"]}";
+}
+
+static std::string update_analysis_run(const App& app,const std::string& run_id,const std::string& user_id,const std::string& body){
+ const std::string status=json_extract_string(body,"status");
+ const std::string notes=json_extract_string(body,"notes");
+ const std::set<std::string> valid_statuses={"REVIEW_REQUIRED","COMPLETED","ARCHIVED","RUNNING","FAILED"};
+ if(!status.empty()&&!valid_statuses.contains(status))throw Failure("Invalid analysis status");
+ if(notes.size()>2000)throw Failure("Notes exceed limit");
+
+ Db db(app.root/"rizoma.sqlite3");
+ Stmt check(db.p,R"SQL(
+  SELECT a.id,a.image_id,a.status,a.notes,a.completed_at
+  FROM analysis_runs a JOIN images i ON i.id=a.image_id
+  WHERE a.id=? AND i.user_id=? AND a.deleted_at IS NULL
+ )SQL");
+ check.bind(1,run_id);check.bind(2,user_id);
+ if(sqlite3_step(check.p)!=SQLITE_ROW)throw Failure("Analysis run not found");
+
+ const std::string image_id=col(check.p,1);
+ const std::string cur_status=col(check.p,2);
+ const std::string cur_notes=col(check.p,3);
+ std::string completed_at=col(check.p,4);
+
+ const std::string new_status=status.empty()?cur_status:status;
+ const std::string new_notes=notes.empty()?cur_notes:notes;
+ const std::string now=utc_offset(0);
+ if(new_status=="COMPLETED"&&completed_at.empty())completed_at=now;
+
+ sql(db.p,"BEGIN IMMEDIATE");try{
+  Stmt update(db.p,"UPDATE analysis_runs SET status=?, notes=?, completed_at=? WHERE id=?");
+  update.bind(1,new_status);update.bind(2,new_notes);update.bind(3,completed_at);update.bind(4,run_id);
+  if(sqlite3_step(update.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
+
+  Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'ANALYSIS_UPDATED',?,?)");
+  ev.bind(1,image_id);ev.bind(2,now);ev.bind(3,"run_id="+run_id+" | status="+new_status);
+  sqlite3_step(ev.p);
+  sql(db.p,"COMMIT");
+ }catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+
+ return "{\"data\":{\"id\":"+q(run_id)+",\"image_id\":"+q(image_id)+",\"status\":"+q(new_status)+",\"notes\":"+q(new_notes)+",\"completed_at\":"+q(completed_at)+"}}";
+}
+
+static std::string delete_analysis_run(const App& app,const std::string& run_id,const std::string& user_id){
+ Db db(app.root/"rizoma.sqlite3");
+ Stmt check(db.p,R"SQL(
+  SELECT a.id,a.image_id
+  FROM analysis_runs a JOIN images i ON i.id=a.image_id
+  WHERE a.id=? AND i.user_id=? AND a.deleted_at IS NULL
+ )SQL");
+ check.bind(1,run_id);check.bind(2,user_id);
+ if(sqlite3_step(check.p)!=SQLITE_ROW)throw Failure("Analysis run not found");
+ const std::string image_id=col(check.p,1);
+
+ const std::string now=utc_offset(0);
+ sql(db.p,"BEGIN IMMEDIATE");try{
+  Stmt update(db.p,"UPDATE analysis_runs SET deleted_at=? WHERE id=? AND deleted_at IS NULL");
+  update.bind(1,now);update.bind(2,run_id);
+  if(sqlite3_step(update.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
+
+  Stmt ev(db.p,"INSERT INTO events(image_id,event,at,detail) VALUES(?,'ANALYSIS_SOFT_DELETED',?,?)");
+  ev.bind(1,image_id);ev.bind(2,now);ev.bind(3,"run_id="+run_id);
+  sqlite3_step(ev.p);
+  sql(db.p,"COMMIT");
+ }catch(...){sqlite3_exec(db.p,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+
+ return "{\"data\":{\"id\":"+q(run_id)+",\"image_id\":"+q(image_id)+",\"deleted\":true,\"deleted_at\":"+q(now)+"}}";
 }
 
 static std::string start_analysis(const App& app,const std::string& image_id,const std::string& user_id,const std::string& algo_req=""){
  Db db(app.root/"rizoma.sqlite3");
- Stmt image(db.p,"SELECT original_path,format,sha256,width,height FROM images WHERE id=? AND user_id=?");image.bind(1,image_id);image.bind(2,user_id);
+ Stmt image(db.p,"SELECT original_path,format,sha256,width,height FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL");image.bind(1,image_id);image.bind(2,user_id);
  if(sqlite3_step(image.p)!=SQLITE_ROW)throw Failure("Image not found");
  const std::string path=col(image.p,0),format=col(image.p,1),source_sha=col(image.p,2);
  const auto width=sqlite3_column_int64(image.p,3),height=sqlite3_column_int64(image.p,4);
@@ -751,13 +870,30 @@ static Response handle(const App& app,const http::request<http::string_body>& re
  }
 
  // Protected routes
- if(p=="/api/v1/images"||p=="/api/v1/export/manifest.csv"||p.starts_with("/api/v1/images/")||p.starts_with("/api/v1/analysis-regions/")){
+ if(p=="/api/v1/images"||p=="/api/v1/export/manifest.csv"||p.starts_with("/api/v1/images/")||p.starts_with("/api/v1/analysis-regions/")||p.starts_with("/api/v1/analysis-runs/")){
   auto user=authenticate(app,req);
   if(!user){
    return problem(v,http::status::unauthorized,"Autenticação necessária. Acesse com seu e-mail institucional @embrapa.br.");
   }
   if(req.method()==http::verb::get&&p=="/api/v1/images")return respond(http::status::ok,v,all_images(app,user->id));
   if(req.method()==http::verb::get&&p=="/api/v1/export/manifest.csv")return respond(http::status::ok,v,manifest(app,user->id),"text/csv; charset=utf-8");
+  if(p.starts_with("/api/v1/analysis-runs/")){
+   std::string run_id=p.substr(std::string("/api/v1/analysis-runs/").size());
+   if(!valid_id(run_id))return problem(v,http::status::bad_request,"Invalid run identifier");
+   try{
+    if(req.method()==http::verb::patch){
+     if(req[http::field::content_type].find("application/json")!=0)return problem(v,http::status::unsupported_media_type,"Use application/json");
+     return respond(http::status::ok,v,update_analysis_run(app,run_id,user->id,req.body()));
+    }
+    if(req.method()==http::verb::delete_){
+     return respond(http::status::ok,v,delete_analysis_run(app,run_id,user->id));
+    }
+   }catch(const Failure& e){
+    std::string msg=e.what();
+    if(msg=="Analysis run not found")return problem(v,http::status::not_found,msg);
+    return problem(v,http::status::unprocessable_entity,msg);
+   }
+  }
   if(p.starts_with("/api/v1/analysis-regions/")){
    std::string rem=p.substr(std::string("/api/v1/analysis-regions/").size());auto slash=rem.find('/');auto region_id=rem.substr(0,slash);
    if(!valid_id(region_id)||slash==std::string::npos||rem.substr(slash+1)!="reviews")return problem(v,http::status::bad_request,"Invalid review resource");
@@ -769,17 +905,41 @@ static Response handle(const App& app,const http::request<http::string_body>& re
     }
    }catch(const Failure& e){std::string message=e.what();if(message=="Review conflict")return problem(v,http::status::conflict,message);if(message=="Region not found")return problem(v,http::status::not_found,message);return problem(v,http::status::unprocessable_entity,message);}
   }
-  if(req.method()==http::verb::post&&p.starts_with("/api/v1/images/")&&p.ends_with("/analysis")){
-   const auto id=p.substr(std::string("/api/v1/images/").size(),p.size()-std::string("/api/v1/images/").size()-std::string("/analysis").size());
-   if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   std::string algo=args.contains("algorithm")?args["algorithm"]:(req.body().empty()?"":json_extract_string(req.body(),"algorithm"));
-   try{return respond(http::status::created,v,start_analysis(app,id,user->id,algo));}catch(const Failure& e){return problem(v,std::string(e.what())=="Image not found"?http::status::not_found:http::status::unprocessable_entity,e.what());}
-  }
-  if(req.method()==http::verb::get&&p.starts_with("/api/v1/images/")){
+  if(p.starts_with("/api/v1/images/")){
    std::string rem=p.substr(std::string("/api/v1/images/").size());auto slash=rem.find('/');auto id=rem.substr(0,slash);if(!valid_id(id))return problem(v,http::status::bad_request,"Invalid image identifier");
-   try{if(slash==std::string::npos)return respond(http::status::ok,v,one_image(app,id,user->id));auto kind=rem.substr(slash+1);if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));if(kind=="pyramid")return respond(http::status::ok,v,pyramid_manifest(app,id,user->id));if(kind.starts_with("tiles/")){std::string mime;auto tile=pyramid_tile(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(tile),mime);}if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
-   std::string mime;std::string binary=media(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(binary),mime);
-   }}catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
+   if(slash==std::string::npos){
+    try{
+     if(req.method()==http::verb::get)return respond(http::status::ok,v,one_image(app,id,user->id));
+     if(req.method()==http::verb::patch){
+      if(req[http::field::content_type].find("application/json")!=0)return problem(v,http::status::unsupported_media_type,"Use application/json");
+      return respond(http::status::ok,v,update_image_metadata(app,id,user->id,req.body()));
+     }
+     if(req.method()==http::verb::delete_){
+      return respond(http::status::ok,v,delete_image(app,id,user->id));
+     }
+    }catch(const Failure& e){
+     std::string msg=e.what();
+     if(msg=="Image not found")return problem(v,http::status::not_found,msg);
+     return problem(v,http::status::unprocessable_entity,msg);
+    }
+   }else{
+    auto kind=rem.substr(slash+1);
+    if(req.method()==http::verb::post&&kind=="analysis"){
+     std::string algo=args.contains("algorithm")?args["algorithm"]:(req.body().empty()?"":json_extract_string(req.body(),"algorithm"));
+     try{return respond(http::status::created,v,start_analysis(app,id,user->id,algo));}catch(const Failure& e){return problem(v,std::string(e.what())=="Image not found"?http::status::not_found:http::status::unprocessable_entity,e.what());}
+    }
+    if(req.method()==http::verb::get){
+     try{
+      if(kind=="analysis")return respond(http::status::ok,v,analysis_json(app,id,user->id,args["run_id"]));
+      if(kind=="analysis-runs")return respond(http::status::ok,v,analysis_runs_json(app,id,user->id));
+      if(kind=="pyramid")return respond(http::status::ok,v,pyramid_manifest(app,id,user->id));
+      if(kind.starts_with("tiles/")){std::string mime;auto tile=pyramid_tile(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(tile),mime);}
+      if(kind=="original"||kind=="original-view"||kind=="preview"||kind=="grayscale"){
+       std::string mime;std::string binary=media(app,id,kind,mime,user->id);return respond(http::status::ok,v,std::move(binary),mime);
+      }
+     }catch(const Failure&){return problem(v,http::status::not_found,"Image not found");}
+    }
+   }
   }
  }
 

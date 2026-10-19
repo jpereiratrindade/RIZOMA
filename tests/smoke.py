@@ -501,8 +501,47 @@ def main():
             status,body,_=req(base+'/api/v1/images/'+uid2,headers=auth_headers2)
             assert status==200
 
+            # 10. CRUD test for Images and Analyses
+            # Patch Image metadata
+            patch_data = json.dumps({'sample_id':'P01-EDITED','capture_date':'2026-10-20','filename':'campo_editado.png'}).encode()
+            status,body,_=req(base+'/api/v1/images/'+uid,'PATCH',patch_data,{'Content-Type':'application/json',**restarted_headers1})
+            assert status==200,(status,body)
+            img_up = json.loads(body)['data']
+            assert img_up['sample_id']=='P01-EDITED' and img_up['capture_date']=='2026-10-20' and img_up['filename']=='campo_editado.png'
+
+            # Patch Analysis Run status and notes
+            patch_run = json.dumps({'status':'COMPLETED','notes':'Validado em campo pelo pesquisador.'}).encode()
+            status,body,_=req(base+'/api/v1/analysis-runs/'+first_run_id,'PATCH',patch_run,{'Content-Type':'application/json',**restarted_headers1})
+            assert status==200,(status,body)
+            run_up = json.loads(body)['data']
+            assert run_up['status']=='COMPLETED' and run_up['notes']=='Validado em campo pelo pesquisador.' and run_up['completed_at']
+
+            # Soft Delete Analysis Run
+            status,body,_=req(base+'/api/v1/analysis-runs/'+first_run_id,'DELETE',headers=restarted_headers1)
+            assert status==200 and json.loads(body)['data']['deleted'] is True
+            # Verified run is not in analysis-runs list
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis-runs',headers=restarted_headers1)
+            runs_list = json.loads(body)['data']
+            assert all(r['id']!=first_run_id for r in runs_list)
+            # Verified GET analysis for deleted run returns data: null
+            status,body,_=req(base+f'/api/v1/images/{analysis_image_id}/analysis?run_id={first_run_id}',headers=restarted_headers1)
+            assert status==200 and json.loads(body)['data'] is None,(status,body)
+
+            # Soft Delete Image
+            status,body,_=req(base+'/api/v1/images/'+uid,'DELETE',headers=restarted_headers1)
+            assert status==200 and json.loads(body)['data']['deleted'] is True
+            # GET image returns 404
+            status,body,_=req(base+'/api/v1/images/'+uid,headers=restarted_headers1)
+            assert status==404,(status,body)
+            # Catalog list decreased from 6 to 5
+            status,body,_=req(base+'/api/v1/images',headers=restarted_headers1)
+            assert len(json.loads(body)['data'])==5
+            # Manifest CSV excludes deleted image
+            status,manifest_body,_=req(base+'/api/v1/export/manifest.csv',headers=restarted_headers1)
+            assert uid.encode() not in manifest_body
+
             assert (Path(temp)/'rizoma.sqlite3').exists()
-            print('RIZOMA smoke PASS: auth, isolation, progressive 49 MP pyramid, experimental analysis, append-only review, conflict and restart')
+            print('RIZOMA smoke PASS: auth, isolation, progressive 49 MP pyramid, experimental analysis, append-only review, conflict, restart and CRUD')
 
         finally:
             if proc.poll() is None:

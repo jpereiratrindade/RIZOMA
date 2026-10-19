@@ -408,6 +408,8 @@ function selectRegion(id){
   if(selectedRegion) loadHistory(selectedRegion.id);
 }
 
+let editingNotes = false;
+
 function renderAnalysis(){
   const panel = $('analysis-panel'), overlay = $('region-overlay');
   if(!currentAnalysis){
@@ -424,8 +426,48 @@ function renderAnalysis(){
   }).join('');
   for(const box of overlay.querySelectorAll('[data-region-box]')) box.onclick = () => selectRegion(box.dataset.regionBox);
   const selected = selectedRegion && regionById(selectedRegion.id);
-  panel.innerHTML = `<div class="analysis-head"><div><span class="section-kicker">ANÁLISE EXPERIMENTAL</span><strong>${h(currentAnalysis.algorithm_version)}</strong></div><span class="analysis-count">${number.format(regions.length)} regiões</span></div>
-    <label class="run-picker">Execução preservada<select id="analysis-run-picker">${analysisRuns.map((run,index) => `<option value="${h(run.id)}" ${run.id===currentAnalysis.id?'selected':''}>${index+1}. ${h(run.created_at)} · ${number.format(run.region_count)} regiões</option>`).join('')}</select></label>
+
+  const st = currentAnalysis.status || 'REVIEW_REQUIRED';
+  const statusLabel = st === 'COMPLETED' ? '✓ Concluída' : (st === 'ARCHIVED' ? '⊘ Arquivada' : '⚡ Revisão Pendente');
+  const statusCls = st === 'COMPLETED' ? 'completed' : (st === 'ARCHIVED' ? 'archived' : 'review');
+
+  const notesHtml = editingNotes ? `
+    <form id="notes-form" class="notes-edit-form">
+      <textarea id="notes-textarea" placeholder="Observações científicas, notas metodológicas ou justificativas...">${h(currentAnalysis.notes || '')}</textarea>
+      <div class="notes-edit-buttons">
+        <button type="button" class="btn-subtle" id="btn-cancel-notes">Cancelar</button>
+        <button type="submit" class="btn-subtle" style="background:var(--blue);color:#fff">Salvar notas</button>
+      </div>
+    </form>
+  ` : `
+    <div class="notes-content">${currentAnalysis.notes ? h(currentAnalysis.notes) : '<span class="notes-empty">Nenhuma observação registrada nesta análise.</span>'}</div>
+  `;
+
+  panel.innerHTML = `<div class="analysis-head">
+      <div>
+        <span class="section-kicker">ANÁLISE EXPERIMENTAL</span>
+        <strong>${h(currentAnalysis.algorithm_version)}</strong>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span class="status-badge ${statusCls}">${statusLabel}</span>
+        <span class="analysis-count">${number.format(regions.length)} regiões</span>
+      </div>
+    </div>
+    <label class="run-picker">Execução preservada
+      <select id="analysis-run-picker">${analysisRuns.map((run,index) => `<option value="${h(run.id)}" ${run.id===currentAnalysis.id?'selected':''}>${index+1}. ${h(run.created_at)} (${h(run.status || 'REVIEW')}) · ${number.format(run.region_count)} regiões</option>`).join('')}</select>
+    </label>
+    <div class="analysis-actions-row">
+      ${st !== 'COMPLETED' ? `<button type="button" class="btn-action-small success" id="btn-complete-analysis" title="Concluir ciclo de revisão">✓ Concluir análise</button>` : ''}
+      ${st !== 'ARCHIVED' ? `<button type="button" class="btn-action-small" id="btn-archive-analysis" title="Arquivar análise">⊘ Arquivar</button>` : ''}
+      <button type="button" class="btn-action-small danger" id="btn-delete-analysis" title="Excluir execução de análise">🗑 Excluir análise</button>
+    </div>
+    <div class="analysis-notes-block">
+      <div class="notes-header">
+        <span>Notas científicas</span>
+        ${!editingNotes ? `<button type="button" class="btn-subtle" id="btn-edit-notes" style="font-size:0.68rem;padding:2px 7px">✏ Editar</button>` : ''}
+      </div>
+      ${notesHtml}
+    </div>
     <p class="analysis-warning">Sugestões não validadas biologicamente. Coordenadas referem-se ao original SHA-256 <code>${h(currentAnalysis.source_sha256.slice(0,12))}…</code></p>
     <div class="region-list">${regions.length ? regions.map(r => {
       const isRecal = !r.review && r.judgment_evidence?.recalibrated;
@@ -442,10 +484,82 @@ function renderAnalysis(){
       </button>`;
     }).join('') : '<p class="no-regions">Nenhuma região candidata foi encontrada com estes parâmetros.</p>'}</div>
     ${selected ? reviewEditor(selected) : '<p class="choose-region">Selecione uma região na imagem ou na lista para revisar.</p>'}`;
+
   for(const row of panel.querySelectorAll('[data-region-row]')) row.onclick = () => selectRegion(row.dataset.regionRow);
   if($('analysis-run-picker')) $('analysis-run-picker').onchange = e => loadAnalysisRun(e.target.value);
   if($('review-form')) $('review-form').onsubmit = (e) => saveReview(e, false);
   if($('btn-next-review')) $('btn-next-review').onclick = (e) => saveReview(e, true);
+
+  if($('btn-complete-analysis')) $('btn-complete-analysis').onclick = () => setAnalysisStatus('COMPLETED');
+  if($('btn-archive-analysis')) $('btn-archive-analysis').onclick = () => setAnalysisStatus('ARCHIVED');
+  if($('btn-delete-analysis')) $('btn-delete-analysis').onclick = () => openDeleteAnalysisModal();
+  if($('btn-edit-notes')) $('btn-edit-notes').onclick = () => { editingNotes = true; renderAnalysis(); };
+  if($('btn-cancel-notes')) $('btn-cancel-notes').onclick = () => { editingNotes = false; renderAnalysis(); };
+  if($('notes-form')) $('notes-form').onsubmit = (e) => {
+    e.preventDefault();
+    saveAnalysisNotes($('notes-textarea').value.trim());
+  };
+}
+
+async function setAnalysisStatus(newStatus){
+  if(!currentAnalysis) return;
+  try{
+    const res = await api(`/api/v1/analysis-runs/${currentAnalysis.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status: newStatus})
+    });
+    currentAnalysis.status = res.data.status;
+    currentAnalysis.completed_at = res.data.completed_at;
+    const item = analysisRuns.find(r => r.id === currentAnalysis.id);
+    if(item) item.status = res.data.status;
+    renderAnalysis();
+    toast(newStatus === 'COMPLETED' ? 'Análise marcada como concluída!' : 'Análise arquivada.');
+  }catch(err){ toast(err.message); }
+}
+
+async function saveAnalysisNotes(notesText){
+  if(!currentAnalysis) return;
+  try{
+    const res = await api(`/api/v1/analysis-runs/${currentAnalysis.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({notes: notesText})
+    });
+    currentAnalysis.notes = res.data.notes;
+    editingNotes = false;
+    renderAnalysis();
+    toast('Notas da análise salvas com sucesso.');
+  }catch(err){ toast(err.message); }
+}
+
+function openDeleteAnalysisModal(){
+  if(!currentAnalysis) return;
+  $('delete-analysis-id').textContent = currentAnalysis.id.slice(0, 12) + '…';
+  $('analysis-delete-modal').classList.remove('hidden');
+}
+
+function closeDeleteAnalysisModal(){
+  $('analysis-delete-modal').classList.add('hidden');
+}
+
+async function confirmDeleteAnalysis(){
+  if(!currentAnalysis) return;
+  const deletedId = currentAnalysis.id;
+  try{
+    await api(`/api/v1/analysis-runs/${deletedId}`, {method: 'DELETE'});
+    closeDeleteAnalysisModal();
+    analysisRuns = analysisRuns.filter(r => r.id !== deletedId);
+    if(analysisRuns.length > 0){
+      await loadAnalysisRun(analysisRuns[0].id);
+    } else {
+      currentAnalysis = null;
+      selectedRegion = null;
+      renderAnalysis();
+      fillInspect();
+    }
+    toast('Execução de análise excluída.');
+  }catch(err){ toast(err.message); }
 }
 
 function reviewEditor(region){
@@ -526,6 +640,9 @@ async function saveReview(event, advanceNext = false){
 
 function closeInspect(){
   $('inspector').classList.add('hidden');
+  closeEditImageModal();
+  closeDeleteImageModal();
+  closeDeleteAnalysisModal();
   if($('auth-overlay').classList.contains('hidden')){
     document.body.style.overflow = '';
   }
@@ -533,8 +650,75 @@ function closeInspect(){
   currentAnalysis = null;
   analysisRuns = [];
   selectedRegion = null;
+  editingNotes = false;
   viewer.revision++; viewer.imageId = null; viewer.manifest = null; viewer.drag = null;
   cancelAnimationFrame(viewer.frame); $('tile-layer').replaceChildren(); $('inspect-image').removeAttribute('src');
+}
+
+function openEditImageModal(){
+  if(!current) return;
+  $('edit-sample-id').value = current.sample_id || '';
+  $('edit-capture-date').value = current.capture_date || '';
+  $('edit-filename').value = current.filename || '';
+  $('image-edit-modal').classList.remove('hidden');
+  $('edit-filename').focus();
+}
+
+function closeEditImageModal(){
+  $('image-edit-modal').classList.add('hidden');
+}
+
+async function saveEditImage(e){
+  e.preventDefault();
+  if(!current) return;
+  const sample_id = $('edit-sample-id').value.trim();
+  const capture_date = $('edit-capture-date').value;
+  const filename = $('edit-filename').value.trim();
+  if(!filename){ toast('Nome do arquivo é obrigatório'); return; }
+  try{
+    const res = await api(`/api/v1/images/${current.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sample_id, capture_date, filename})
+    });
+    current.sample_id = res.data.sample_id;
+    current.capture_date = res.data.capture_date;
+    current.filename = res.data.filename;
+    const inList = images.find(img => img.id === current.id);
+    if(inList){
+      inList.sample_id = res.data.sample_id;
+      inList.capture_date = res.data.capture_date;
+      inList.filename = res.data.filename;
+    }
+    $('inspect-title').textContent = current.filename;
+    fillInspect();
+    render();
+    closeEditImageModal();
+    toast('Metadados da imagem atualizados.');
+  }catch(err){ toast(err.message); }
+}
+
+function openDeleteImageModal(){
+  if(!current) return;
+  $('delete-image-name').textContent = current.filename;
+  $('image-delete-modal').classList.remove('hidden');
+}
+
+function closeDeleteImageModal(){
+  $('image-delete-modal').classList.add('hidden');
+}
+
+async function confirmDeleteImage(){
+  if(!current) return;
+  const imageId = current.id;
+  try{
+    await api(`/api/v1/images/${imageId}`, {method: 'DELETE'});
+    closeDeleteImageModal();
+    closeInspect();
+    images = images.filter(img => img.id !== imageId);
+    render();
+    toast('Imagem removida do acervo.');
+  }catch(err){ toast(err.message); }
 }
 
 function filesSelected(files){
@@ -680,5 +864,21 @@ const initial = location.hash.slice(1);
 nav(viewNames[initial] ? initial : 'acervo');
 refresh();
 
+// Image and Analysis CRUD modal listeners
+$('btn-edit-image').onclick = openEditImageModal;
+$('close-edit-image').onclick = closeEditImageModal;
+$('btn-cancel-edit-image').onclick = closeEditImageModal;
+$('edit-image-form').onsubmit = saveEditImage;
+
+$('btn-delete-image').onclick = openDeleteImageModal;
+$('close-delete-image').onclick = closeDeleteImageModal;
+$('btn-cancel-delete-image').onclick = closeDeleteImageModal;
+$('btn-confirm-delete-image').onclick = confirmDeleteImage;
+
+$('close-delete-analysis').onclick = closeDeleteAnalysisModal;
+$('btn-cancel-delete-analysis').onclick = closeDeleteAnalysisModal;
+$('btn-confirm-delete-analysis').onclick = confirmDeleteAnalysis;
+
 // Previne o zoom acidental da pagina inteira pelo navegador via Ctrl + Roda do mouse
 window.addEventListener('wheel', e => { if(e.ctrlKey) e.preventDefault(); }, { passive: false });
+
