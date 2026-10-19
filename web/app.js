@@ -22,6 +22,34 @@ let images = [], selectedFiles = [], current = null, mode = 'original', currentU
 let viewer = {imageId:null, manifest:null, scale:1, x:0, y:0, fit:true, drag:null, revision:0, frame:0};
 const viewNames = {acervo:'Acervo de imagens',recebimento:'Recebimento',integridade:'Integridade e origem',sobre:'Sobre o RIZOMA'};
 
+const STRATEGY_DESCRIPTIONS = {
+  BAYESIAN_CALIBRATED: {
+    name: 'Nível 1: Calibração Bayesiana (Recomendado)',
+    badge: 'Inferência Probabilística',
+    summary: 'Modela a distribuição estatística de cor, luminância e textura das amostras com atualização contínua de verossimilhança. Rápido, determinístico e excelente para contraste padrão solo-raiz.'
+  },
+  TABULAR_INCREMENTAL: {
+    name: 'Nível 2: Classificador Tabular (Online ML)',
+    badge: 'Aprendizado de Máquina Incremental',
+    summary: 'Extrai 8 atributos biométricos (área, perímetro, desvio RGB, gradientes) e treina um classificador linear online que ajusta seus pesos matemáticos a cada revisão humana.'
+  },
+  VISUAL_KNN: {
+    name: 'Nível 3: Similaridade Visual k-NN & Active Learning',
+    badge: 'Aprendizado Ativo Guiado',
+    summary: 'Mapeia vetores de descritores no espaço métrico multidimensional. Prioriza automaticamente amostras com maior incerteza para acelerar a calibração com menos esforço.'
+  },
+  BASELINE_HEURISTIC: {
+    name: 'Baseline Heurístico (Estático)',
+    badge: 'Regras Tradicionais',
+    summary: 'Segmentação determinística por limiares morfológicos fixos sem aprendizado incremental.'
+  }
+};
+
+function getStrategyDescHtml(key){
+  const s = STRATEGY_DESCRIPTIONS[key] || STRATEGY_DESCRIPTIONS.BAYESIAN_CALIBRATED;
+  return `<strong>${h(s.badge)}</strong><span>${h(s.summary)}</span>`;
+}
+
 function toast(message){
   $('toast').textContent = message;
   $('toast').classList.add('visible');
@@ -523,7 +551,7 @@ let segModelStats = null;
 
 function recomputeSegmentation(sensitivity = segSensitivity) {
   if (!segModelStats) return;
-  const { src, w, h, seedMask, meanR, meanG, meanB, stdR, stdG, stdB, sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
+  const { src, w, h, seedMask, confirmedSoilMask, meanR, meanG, meanB, stdR, stdG, stdB, sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
           rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas, rootsCtx, matrixCtx, binaryCtx, overlayCtx,
           rootsData, matrixData, binaryData, overlayData } = segModelStats;
 
@@ -532,6 +560,11 @@ function recomputeSegmentation(sensitivity = segSensitivity) {
   const total = w * h;
 
   for (let i = 0; i < total; i++) {
+    // Se a região foi categorizada e confirmada pelo usuário como solo ou artefato, nunca marcar como raiz
+    if (confirmedSoilMask && confirmedSoilMask[i] === 1) {
+      continue;
+    }
+
     const idx = i * 4;
     const r = src[idx], g = src[idx + 1], b = src[idx + 2];
     const distRoot = Math.sqrt(
@@ -559,6 +592,7 @@ function recomputeSegmentation(sensitivity = segSensitivity) {
     const row = y * w;
     for (let x = 1; x < w - 1; x++) {
       const i = row + x;
+      if (confirmedSoilMask && confirmedSoilMask[i] === 1) continue;
       if (isRootPixel[i]) {
         refinedMask[i] = 1;
         totalRootPx++;
@@ -673,12 +707,18 @@ async function prepareSegmentationCanvases(force = false) {
     let sumR = 0, sumG = 0, sumB = 0, sumGray = 0, rootPixCount = 0;
     let sqR = 0, sqG = 0, sqB = 0;
 
+    let soilSumR = 0, soilSumG = 0, soilSumB = 0, soilCount = 0;
+    let soilSqR = 0, soilSqG = 0, soilSqB = 0;
+
     const seedMask = new Uint8Array(w * h);
+    const confirmedSoilMask = new Uint8Array(w * h);
+
     for (const r of regions) {
       const label = r.review?.label || r.suggestion;
+      const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
+      const x1 = Math.min(w, Math.ceil(r.x + r.width)), y1 = Math.min(h, Math.ceil(r.y + r.height));
+
       if (label === 'ROOT') {
-        const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
-        const x1 = Math.min(w, Math.ceil(r.x + r.width)), y1 = Math.min(h, Math.ceil(r.y + r.height));
         for (let y = y0; y < y1; y++) {
           const row = y * w;
           for (let x = x0; x < x1; x++) {
@@ -691,14 +731,26 @@ async function prepareSegmentationCanvases(force = false) {
             rootPixCount++;
           }
         }
+      } else if (label === 'MATRIX' || label === 'ARTIFACT') {
+        // Amostras negativas confirmadas por humano: enriquecer solo e impedir marcação de raiz
+        for (let y = y0; y < y1; y++) {
+          const row = y * w;
+          for (let x = x0; x < x1; x++) {
+            confirmedSoilMask[row + x] = 1;
+            const idx = (row + x) * 4;
+            const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
+            // Peso reforçado para calibração ativa de solo/artefato
+            soilSumR += pr * 2; soilSumG += pg * 2; soilSumB += pb * 2;
+            soilSqR += pr * pr * 2; soilSqG += pg * pg * 2; soilSqB += pb * pb * 2;
+            soilCount += 2;
+          }
+        }
       }
     }
 
-    let soilSumR = 0, soilSumG = 0, soilSumB = 0, soilCount = 0;
-    let soilSqR = 0, soilSqG = 0, soilSqB = 0;
     const step = Math.max(1, Math.floor((w * h) / 10000));
     for (let i = 0; i < w * h; i += step) {
-      if (!seedMask[i]) {
+      if (!seedMask[i] && !confirmedSoilMask[i]) {
         const idx = i * 4;
         const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
         soilSumR += pr; soilSumG += pg; soilSumB += pb;
@@ -719,7 +771,7 @@ async function prepareSegmentationCanvases(force = false) {
     const sStdB = Math.max(8, Math.sqrt(Math.max(0, soilSqB / nSoil - sMeanB * sMeanB)));
 
     segModelStats = {
-      src, w, h, seedMask,
+      src, w, h, seedMask, confirmedSoilMask,
       meanR, meanG, meanB, stdR, stdG, stdB,
       sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
       rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas,
@@ -882,6 +934,9 @@ function renderAnalysis(){
               <option value="BASELINE_HEURISTIC">Baseline Heurístico (Estático)</option>
             </select>
           </label>
+          <div class="strategy-desc-banner" id="strategy-desc-banner">
+            ${getStrategyDescHtml('BAYESIAN_CALIBRATED')}
+          </div>
 
           <div class="analysis-feature-list">
             <div class="feat-item">
@@ -914,10 +969,25 @@ function renderAnalysis(){
       </div>
     `;
 
+    const stratSelect = $('analysis-strategy-empty');
+    if (stratSelect) {
+      stratSelect.onchange = e => {
+        const banner = $('strategy-desc-banner');
+        if (banner) banner.innerHTML = getStrategyDescHtml(e.target.value);
+        if ($('analysis-strategy')) $('analysis-strategy').value = e.target.value;
+      };
+    }
+    if ($('analysis-strategy')) {
+      $('analysis-strategy').onchange = e => {
+        if ($('analysis-strategy-empty')) $('analysis-strategy-empty').value = e.target.value;
+        const banner = $('strategy-desc-banner');
+        if (banner) banner.innerHTML = getStrategyDescHtml(e.target.value);
+      };
+    }
+
     const btnEmpty = $('btn-start-analysis-empty');
     if (btnEmpty) {
       btnEmpty.onclick = () => {
-        const stratSelect = $('analysis-strategy-empty');
         if (stratSelect && $('analysis-strategy')) {
           $('analysis-strategy').value = stratSelect.value;
         }
@@ -1092,6 +1162,9 @@ function renderAnalysis(){
         <span class="analysis-count">${number.format(regions.length)} regiões</span>
       </div>
     </div>
+    <div class="strategy-desc-banner" id="strategy-desc-banner-active" style="margin:8px 0 10px">
+      ${getStrategyDescHtml(currentAnalysis.algorithm_version || $('analysis-strategy')?.value || 'BAYESIAN_CALIBRATED')}
+    </div>
     <label class="run-picker">Execução preservada
       <select id="analysis-run-picker">${analysisRuns.map((run,index) => `<option value="${h(run.id)}" ${run.id===currentAnalysis.id?'selected':''}>${index+1}. ${h(run.created_at)} (${h(run.status || 'REVIEW')}) · ${number.format(run.region_count)} regiões</option>`).join('')}</select>
     </label>
@@ -1131,6 +1204,29 @@ function renderAnalysis(){
   if($('analysis-run-picker')) $('analysis-run-picker').onchange = e => loadAnalysisRun(e.target.value);
   if($('review-form')) $('review-form').onsubmit = (e) => saveReview(e, false);
   if($('btn-next-review')) $('btn-next-review').onclick = (e) => saveReview(e, true);
+
+  const reviewLabel = $('review-label');
+  const reviewAction = $('review-action');
+  if (reviewLabel && reviewAction && selected) {
+    const curHypo = selected.review?.label || selected.suggestion;
+    reviewLabel.onchange = () => {
+      if (reviewLabel.value !== curHypo) {
+        reviewAction.value = 'CORRECT';
+      } else {
+        reviewAction.value = curHypo === 'UNKNOWN' ? 'CORRECT' : 'CONFIRM';
+      }
+    };
+  }
+
+  if ($('analysis-strategy')) {
+    $('analysis-strategy').onchange = e => {
+      const banner = $('strategy-desc-banner-active') || $('strategy-desc-banner');
+      if (banner) banner.innerHTML = getStrategyDescHtml(e.target.value);
+      if ($('analysis-strategy-empty')) $('analysis-strategy-empty').value = e.target.value;
+      const s = STRATEGY_DESCRIPTIONS[e.target.value];
+      if (s) $('analysis-strategy').title = `${s.name} — ${s.summary}`;
+    };
+  }
 
   // Botões de camada do painel lateral
   for(const b of panel.querySelectorAll('[data-layer-btn]')){
@@ -1459,7 +1555,9 @@ async function submitBatchConfirm(e){
 }
 
 function reviewEditor(region){
-  const label = region.review?.label || region.suggestion;
+  const currentHypothesis = region.review?.label || region.suggestion;
+  const isUnknown = currentHypothesis === 'UNKNOWN';
+  const label = region.review?.label || (isUnknown ? 'ROOT' : region.suggestion);
   const jev = region.judgment_evidence || {};
   const learning = jev.learning || {};
   const conf = jev.confidence ? Math.round(jev.confidence * 100) : null;
@@ -1483,13 +1581,15 @@ function reviewEditor(region){
     </div>
   `;
 
+  const actionDefault = isUnknown ? 'CORRECT' : (region.review ? 'CORRECT' : 'CONFIRM');
+
   return `<form id="review-form" class="review-form">
     <h3>Revisar região R${region.ordinal}</h3>
     ${sampleCropHtml}
     ${badge}
     <p class="automatic-hypothesis">Hipótese automática: <strong>${h(automaticLabel(region.suggestion, isRecalibrated))}</strong>. Concordância é evidência técnica, não confiança científica.</p>
     <div class="evidence"><span>Global: ${number.format(region.evidence.global_pixels)}</span><span>Local: ${number.format(region.evidence.local_pixels)}</span><span>Concordância: ${number.format(region.evidence.shared_pixels)} px</span></div>
-    <label>Ação<select id="review-action"><option value="CONFIRM">Confirmar interpretação</option><option value="CORRECT">Corrigir classificação</option><option value="SUSPEND">Suspender julgamento</option></select></label>
+    <label>Ação<select id="review-action"><option value="CONFIRM" ${actionDefault==='CONFIRM'?'selected':''}>Confirmar interpretação</option><option value="CORRECT" ${actionDefault==='CORRECT'?'selected':''}>${isUnknown ? 'Classificar / Atribuir rótulo' : 'Corrigir classificação'}</option><option value="SUSPEND">Suspender julgamento</option></select></label>
     <label>Classificação<select id="review-label">${['ROOT','MATRIX','ARTIFACT','UNKNOWN'].map(v => `<option ${v===label?'selected':''}>${v}</option>`).join('')}</select></label>
     <label>Justificativa<textarea id="review-justification" maxlength="1000" placeholder="Evidência ou motivo da decisão">${h(region.review?.justification || '')}</textarea></label>
     <button class="button primary full" type="submit">Salvar nova revisão</button>
@@ -1538,8 +1638,16 @@ async function saveReview(event, advanceNext = false){
   if(!selectedRegion) return;
   const targetRegionId = selectedRegion.id;
   const activeRunId = currentAnalysis?.id;
-  const action=$('review-action').value;
-  const label=action==='SUSPEND'?'UNKNOWN':$('review-label').value;
+  let action = $('review-action')?.value || 'CONFIRM';
+  let label = action === 'SUSPEND' ? 'UNKNOWN' : ($('review-label')?.value || 'ROOT');
+  const curHypo = selectedRegion.review?.label || selectedRegion.suggestion;
+
+  // Se o usuário selecionou CONFIRM mas o rótulo é diferente da hipótese atual,
+  // ou se a hipótese é UNKNOWN e o usuário escolheu ROOT/MATRIX/ARTIFACT, ajusta para CORRECT
+  if(action === 'CONFIRM' && label !== curHypo){
+    action = 'CORRECT';
+  }
+
   const nextTarget = advanceNext ? findNextRecommendedRegion(targetRegionId) : null;
   try{
     const revRes = await api(`/api/v1/analysis-regions/${targetRegionId}/reviews`, {
@@ -1553,11 +1661,15 @@ async function saveReview(event, advanceNext = false){
     selectedRegion = nextTarget ? regionById(nextTarget.id) : regionById(targetRegionId);
     renderAnalysis();
     if(selectedRegion) loadHistory(selectedRegion.id);
+
+    // Retreinar o modelo estatístico e atualizar todas as camadas científicas em tempo real!
+    await prepareSegmentationCanvases(true);
+
     const recalibrated = revRes?.recalibrated_count || 0;
     if(recalibrated > 0){
-      toast(`Revisão salva! ${recalibrated} região(ões) pendente(s) foram recalibradas em tempo real.`);
+      toast(`Revisão salva! Modelo retreinado e ${recalibrated} região(ões) recalibradas em tempo real.`);
     } else {
-      toast('Revisão salva no histórico.');
+      toast('Revisão salva e classificação atualizada em tempo real!');
     }
   }catch(err){
     toast(err.message === 'Review conflict' ? 'Conflito: a região foi revisada em outra sessão. Recarregue a análise.' : err.message);

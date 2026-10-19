@@ -209,6 +209,10 @@
 .btn-focus-sample{background:linear-gradient(135deg,#1a598a,#124368);color:#fff;border:0;border-radius:5px;padding:5px 10px;font-size:.7rem;font-weight:750;cursor:pointer;transition:background .15s}
 .btn-focus-sample:hover{background:var(--blue)}
 
+/* Strategy Methodology Explainer Banner */
+.strategy-desc-banner{background:#f1f7fc;border-left:3px solid var(--blue);border-radius:0 6px 6px 0;padding:8px 10px;margin:8px 0 14px;font-size:.72rem;line-height:1.35;color:var(--navy)}
+.strategy-desc-banner strong{display:block;color:var(--blue);font-size:.7rem;margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em}
+
 
 
 

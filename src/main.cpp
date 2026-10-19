@@ -868,7 +868,10 @@ static std::string add_review(const App& app,const std::string& region_id,const 
   if(sqlite3_step(region.p)!=SQLITE_ROW)throw Failure("Region not found");
   const int current_version=sqlite3_column_int(region.p,0);
   if(current_version!=expected)throw Failure("Review conflict");
-  if(action=="CONFIRM"&&label!=col(region.p,2))throw Failure("Confirmation label does not match the current interpretation");
+  std::string final_action = action;
+  if(action=="CONFIRM"&&label!=col(region.p,2)){
+    final_action = "CORRECT";
+  }
 
   const std::uint64_t reg_x=sqlite3_column_int64(region.p,3),reg_y=sqlite3_column_int64(region.p,4);
   const std::uint64_t reg_w=sqlite3_column_int64(region.p,5),reg_h=sqlite3_column_int64(region.p,6);
@@ -882,12 +885,12 @@ static std::string add_review(const App& app,const std::string& region_id,const 
   const bool touches_b=sqlite3_column_int(region.p,17)!=0;
 
   const int next=current_version+1;const std::string event_id=rand_id(),now=utc_offset(0);
-  Stmt event(db.p,"INSERT INTO review_events(id,region_id,reviewer_user_id,version,action,label,justification,created_at) VALUES(?,?,?,?,?,?,?,?)");event.bind(1,event_id);event.bind(2,region_id);event.bind(3,user_id);sqlite3_bind_int(event.p,4,next);event.bind(5,action);event.bind(6,label);event.bind(7,justification);event.bind(8,now);
+  Stmt event(db.p,"INSERT INTO review_events(id,region_id,reviewer_user_id,version,action,label,justification,created_at) VALUES(?,?,?,?,?,?,?,?)");event.bind(1,event_id);event.bind(2,region_id);event.bind(3,user_id);sqlite3_bind_int(event.p,4,next);event.bind(5,final_action);event.bind(6,label);event.bind(7,justification);event.bind(8,now);
   if(sqlite3_step(event.p)!=SQLITE_DONE)throw Failure(sqlite3_errmsg(db.p));
   Stmt update(db.p,"UPDATE analysis_regions SET current_version=? WHERE id=? AND current_version=?");sqlite3_bind_int(update.p,1,next);update.bind(2,region_id);sqlite3_bind_int(update.p,3,current_version);
   if(sqlite3_step(update.p)!=SQLITE_DONE||sqlite3_changes(db.p)!=1)throw Failure("Review conflict");
 
-  if(action=="CONFIRM"||action=="CORRECT"){
+  if(final_action=="CONFIRM"||final_action=="CORRECT"){
    const bool is_root=(label=="ROOT");
    rizoma::analysis::Region r_obj{reg_x,reg_y,reg_w,reg_h,reg_area,
      static_cast<std::uint64_t>(glob_px),
