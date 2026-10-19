@@ -551,7 +551,7 @@ let segModelStats = null;
 
 function recomputeSegmentation(sensitivity = segSensitivity) {
   if (!segModelStats) return;
-  const { src, w, h, seedMask, confirmedSoilMask, meanR, meanG, meanB, stdR, stdG, stdB, sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
+  const { src, w, h, meanR, meanG, meanB, stdR, stdG, stdB, sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
           rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas, rootsCtx, matrixCtx, binaryCtx, overlayCtx,
           rootsData, matrixData, binaryData, overlayData } = segModelStats;
 
@@ -560,11 +560,6 @@ function recomputeSegmentation(sensitivity = segSensitivity) {
   const total = w * h;
 
   for (let i = 0; i < total; i++) {
-    // Se a região foi categorizada e confirmada pelo usuário como solo ou artefato, nunca marcar como raiz
-    if (confirmedSoilMask && confirmedSoilMask[i] === 1) {
-      continue;
-    }
-
     const idx = i * 4;
     const r = src[idx], g = src[idx + 1], b = src[idx + 2];
     const distRoot = Math.sqrt(
@@ -578,32 +573,35 @@ function recomputeSegmentation(sensitivity = segSensitivity) {
       Math.pow((b - sMeanB) / sStdB, 2)
     );
 
-    const isSeed = seedMask[i] === 1;
-    const matchesRootModel = (distRoot < sensitivity) && (distRoot < distSoil * 1.05);
-    if (isSeed || matchesRootModel) {
+    // Classificação orgânica pixel-a-pixel:
+    // Nunca impõe retângulos rígidos; o contorno segue exatamente o filamento natural
+    if (distRoot < sensitivity && distRoot < distSoil * 0.98) {
       isRootPixel[i] = 1;
     }
   }
 
-  // Morfologia de continuidade (conectar filamentos)
+  // Morfologia de continuidade: remove ruído isolado de 1px e conecta eixos radiculares
   const refinedMask = new Uint8Array(w * h);
   let totalRootPx = 0;
   for (let y = 1; y < h - 1; y++) {
     const row = y * w;
     for (let x = 1; x < w - 1; x++) {
       const i = row + x;
-      if (confirmedSoilMask && confirmedSoilMask[i] === 1) continue;
+      const neighbors = isRootPixel[i - 1] + isRootPixel[i + 1] + isRootPixel[i - w] + isRootPixel[i + w];
       if (isRootPixel[i]) {
-        refinedMask[i] = 1;
-        totalRootPx++;
+        // Preservar apenas se conectado a filamento (ignora ruídos isolados no solo)
+        if (neighbors >= 1) {
+          refinedMask[i] = 1;
+          totalRootPx++;
+        }
         continue;
       }
-      const neighbors = isRootPixel[i - 1] + isRootPixel[i + 1] + isRootPixel[i - w] + isRootPixel[i + w];
+      // Conectar quebras em filamentos finos
       if (neighbors >= 2) {
         const idx = i * 4;
         const r = src[idx], g = src[idx + 1], b = src[idx + 2];
         const distRoot = Math.sqrt(Math.pow((r - meanR) / stdR, 2) + Math.pow((g - meanG) / stdG, 2) + Math.pow((b - meanB) / stdB, 2));
-        if (distRoot < sensitivity + 0.6) {
+        if (distRoot < sensitivity + 0.35) {
           refinedMask[i] = 1;
           totalRootPx++;
         }
@@ -616,15 +614,16 @@ function recomputeSegmentation(sensitivity = segSensitivity) {
     const idx = i * 4;
     const r = src[idx], g = src[idx + 1], b = src[idx + 2];
     if (refinedMask[i]) {
+      // Camada 'roots': Apenas os pixels orgânicos de raiz, fundo transparente
       rPix[idx] = r; rPix[idx + 1] = g; rPix[idx + 2] = b; rPix[idx + 3] = 255;
-      mPix[idx] = Math.round(sMeanR * 0.4 + r * 0.1);
-      mPix[idx + 1] = Math.round(sMeanG * 0.4 + g * 0.1);
-      mPix[idx + 2] = Math.round(sMeanB * 0.4 + b * 0.1);
-      mPix[idx + 3] = 160;
+      // Camada 'matrix': Solo original com raízes subtraídas (fundo branco limpo no lugar da raiz)
+      mPix[idx] = 255; mPix[idx + 1] = 255; mPix[idx + 2] = 255; mPix[idx + 3] = 255;
+      // Camada 'binary': Máscara P&B (Branco = Raiz, Preto = Solo)
       bPix[idx] = 255; bPix[idx + 1] = 255; bPix[idx + 2] = 255; bPix[idx + 3] = 255;
-      oPix[idx] = Math.round(r * 0.4);
-      oPix[idx + 1] = Math.min(255, Math.round(g * 1.35 + 45));
-      oPix[idx + 2] = Math.round(b * 0.5);
+      // Camada 'overlay': Foto com realce fluorescente bio-verde
+      oPix[idx] = Math.round(r * 0.35);
+      oPix[idx + 1] = Math.min(255, Math.round(g * 1.35 + 50));
+      oPix[idx + 2] = Math.round(b * 0.45);
       oPix[idx + 3] = 255;
     } else {
       rPix[idx] = 0; rPix[idx + 1] = 0; rPix[idx + 2] = 0; rPix[idx + 3] = 0;
@@ -702,44 +701,70 @@ async function prepareSegmentationCanvases(force = false) {
     const overlayCtx = overlayCanvas.getContext('2d');
     const overlayData = overlayCtx.createImageData(w, h);
 
-    // 1. Amostragem Supervisionada: Aprender a identidade espectral da raiz e do solo
-    const regions = currentAnalysis.regions || [];
-    let sumR = 0, sumG = 0, sumB = 0, sumGray = 0, rootPixCount = 0;
+    // 1. Amostragem Fina: Aprender a distribuição espectral de raiz e solo sem forçar blocos retangulares
+    let sumR = 0, sumG = 0, sumB = 0, rootPixCount = 0;
     let sqR = 0, sqG = 0, sqB = 0;
 
     let soilSumR = 0, soilSumG = 0, soilSumB = 0, soilCount = 0;
     let soilSqR = 0, soilSqG = 0, soilSqB = 0;
 
-    const seedMask = new Uint8Array(w * h);
-    const confirmedSoilMask = new Uint8Array(w * h);
+    // Amostragem de fundo geral do solo do monolito (grade distribuída)
+    const step = Math.max(1, Math.floor((w * h) / 10000));
+    for (let i = 0; i < w * h; i += step) {
+      const idx = i * 4;
+      const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
+      soilSumR += pr; soilSumG += pg; soilSumB += pb;
+      soilSqR += pr * pr; soilSqG += pg * pg; soilSqB += pb * pb;
+      soilCount++;
+    }
 
+    const regions = currentAnalysis.regions || [];
     for (const r of regions) {
       const label = r.review?.label || r.suggestion;
       const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
       const x1 = Math.min(w, Math.ceil(r.x + r.width)), y1 = Math.min(h, Math.ceil(r.y + r.height));
+      const boxW = x1 - x0, boxH = y1 - y0;
+      if (boxW <= 0 || boxH <= 0) continue;
 
       if (label === 'ROOT') {
+        // Encontrar média de luminância na vizinhança da caixa para isolar o filamento
+        let localSum = 0, count = 0;
         for (let y = y0; y < y1; y++) {
           const row = y * w;
           for (let x = x0; x < x1; x++) {
-            seedMask[row + x] = 1;
+            const idx = (row + x) * 4;
+            localSum += 0.299 * src[idx] + 0.587 * src[idx + 1] + 0.114 * src[idx + 2];
+            count++;
+          }
+        }
+        const localMean = count > 0 ? (localSum / count) : 128;
+
+        // Amostrar apenas os pixels que realmente se destacam como filamento radicular dentro da caixa!
+        // Os demais pixels dentro da caixa permanecem como solo.
+        for (let y = y0; y < y1; y++) {
+          const row = y * w;
+          for (let x = x0; x < x1; x++) {
             const idx = (row + x) * 4;
             const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
             const pGray = 0.299 * pr + 0.587 * pg + 0.114 * pb;
-            sumR += pr; sumG += pg; sumB += pb; sumGray += pGray;
-            sqR += pr * pr; sqG += pg * pg; sqB += pb * pb;
-            rootPixCount++;
+            if (pGray > localMean + 3) {
+              sumR += pr; sumG += pg; sumB += pb;
+              sqR += pr * pr; sqG += pg * pg; sqB += pb * pb;
+              rootPixCount++;
+            } else {
+              soilSumR += pr; soilSumG += pg; soilSumB += pb;
+              soilSqR += pr * pr; soilSqG += pg * pg; soilSqB += pb * pb;
+              soilCount++;
+            }
           }
         }
       } else if (label === 'MATRIX' || label === 'ARTIFACT') {
-        // Amostras negativas confirmadas por humano: enriquecer solo e impedir marcação de raiz
+        // Amostra confirmada como solo ou artefato: calibra distribuição negativa
         for (let y = y0; y < y1; y++) {
           const row = y * w;
           for (let x = x0; x < x1; x++) {
-            confirmedSoilMask[row + x] = 1;
             const idx = (row + x) * 4;
             const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
-            // Peso reforçado para calibração ativa de solo/artefato
             soilSumR += pr * 2; soilSumG += pg * 2; soilSumB += pb * 2;
             soilSqR += pr * pr * 2; soilSqG += pg * pg * 2; soilSqB += pb * pb * 2;
             soilCount += 2;
@@ -748,30 +773,19 @@ async function prepareSegmentationCanvases(force = false) {
       }
     }
 
-    const step = Math.max(1, Math.floor((w * h) / 10000));
-    for (let i = 0; i < w * h; i += step) {
-      if (!seedMask[i] && !confirmedSoilMask[i]) {
-        const idx = i * 4;
-        const pr = src[idx], pg = src[idx + 1], pb = src[idx + 2];
-        soilSumR += pr; soilSumG += pg; soilSumB += pb;
-        soilSqR += pr * pr; soilSqG += pg * pg; soilSqB += pb * pb;
-        soilCount++;
-      }
-    }
-
     const nRoot = Math.max(1, rootPixCount), nSoil = Math.max(1, soilCount);
     const meanR = sumR / nRoot, meanG = sumG / nRoot, meanB = sumB / nRoot;
-    const stdR = Math.max(8, Math.sqrt(Math.max(0, sqR / nRoot - meanR * meanR)));
-    const stdG = Math.max(8, Math.sqrt(Math.max(0, sqG / nRoot - meanG * meanG)));
-    const stdB = Math.max(8, Math.sqrt(Math.max(0, sqB / nRoot - meanB * meanB)));
+    const stdR = Math.max(10, Math.sqrt(Math.max(0, sqR / nRoot - meanR * meanR)));
+    const stdG = Math.max(10, Math.sqrt(Math.max(0, sqG / nRoot - meanG * meanG)));
+    const stdB = Math.max(10, Math.sqrt(Math.max(0, sqB / nRoot - meanB * meanB)));
 
     const sMeanR = soilSumR / nSoil, sMeanG = soilSumG / nSoil, sMeanB = soilSumB / nSoil;
-    const sStdR = Math.max(8, Math.sqrt(Math.max(0, soilSqR / nSoil - sMeanR * sMeanR)));
-    const sStdG = Math.max(8, Math.sqrt(Math.max(0, soilSqG / nSoil - sMeanG * sMeanG)));
-    const sStdB = Math.max(8, Math.sqrt(Math.max(0, soilSqB / nSoil - sMeanB * sMeanB)));
+    const sStdR = Math.max(10, Math.sqrt(Math.max(0, soilSqR / nSoil - sMeanR * sMeanR)));
+    const sStdG = Math.max(10, Math.sqrt(Math.max(0, soilSqG / nSoil - sMeanG * sMeanG)));
+    const sStdB = Math.max(10, Math.sqrt(Math.max(0, soilSqB / nSoil - sMeanB * sMeanB)));
 
     segModelStats = {
-      src, w, h, seedMask, confirmedSoilMask,
+      src, w, h,
       meanR, meanG, meanB, stdR, stdG, stdB,
       sMeanR, sMeanG, sMeanB, sStdR, sStdG, sStdB,
       rootsCanvas, matrixCanvas, binaryCanvas, overlayCanvas,
@@ -1317,29 +1331,27 @@ async function exportClassifiedImage(){
     canvas.height = h + bannerH;
     const ctx = canvas.getContext('2d');
 
-    // 1. Imagem base original em alta resolução
-    ctx.drawImage(img, 0, 0, w, h);
+    // 1. Imagem base: usar a camada de sobreposição orgânica pixel-a-pixel (com filamentos reais destacados)
+    if (segCanvases && segCanvases.overlay) {
+      ctx.drawImage(segCanvases.overlay, 0, 0, w, h);
+    } else {
+      ctx.drawImage(img, 0, 0, w, h);
+    }
 
-    // 2. Sobreposição limpa das estruturas radiculares (sem caixas de texto poluentes)
+    // 2. Traçado sutil das caixas de inspeção (apenas contorno fino, NUNCA preencher retângulos sólidos)
     const regions = currentAnalysis.regions || [];
-    const lineWidth = Math.max(1, Math.round(1.2 * scale));
+    const lineWidth = Math.max(1, Math.round(1.0 * scale));
 
     for (const r of regions) {
       const finalLabel = r.review?.label || r.suggestion;
-      let strokeColor = 'rgba(92,139,166,0.8)', fillColor = 'rgba(92,139,166,0.14)';
+      let strokeColor = 'rgba(92,139,166,0.55)';
       if (finalLabel === 'ROOT') {
-        strokeColor = 'rgba(32,182,138,0.92)';
-        fillColor = 'rgba(32,182,138,0.22)';
+        strokeColor = 'rgba(32,182,138,0.75)';
       } else if (finalLabel === 'MATRIX') {
-        strokeColor = 'rgba(230,168,23,0.85)';
-        fillColor = 'rgba(230,168,23,0.18)';
+        strokeColor = 'rgba(230,168,23,0.65)';
       } else if (finalLabel === 'ARTIFACT') {
-        strokeColor = 'rgba(224,86,56,0.85)';
-        fillColor = 'rgba(224,86,56,0.22)';
+        strokeColor = 'rgba(224,86,56,0.65)';
       }
-
-      ctx.fillStyle = fillColor;
-      ctx.fillRect(r.x, r.y, r.width, r.height);
 
       ctx.lineWidth = lineWidth;
       ctx.strokeStyle = strokeColor;
