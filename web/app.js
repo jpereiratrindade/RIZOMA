@@ -593,72 +593,112 @@ async function exportClassifiedImage(){
     canvas.height = h + bannerH;
     const ctx = canvas.getContext('2d');
 
-    // 1. Imagem base original
+    // 1. Imagem base original em alta resolução
     ctx.drawImage(img, 0, 0, w, h);
 
-    // 2. Sobreposição de regiões classificadas
+    // 2. Sobreposição limpa das estruturas radiculares (sem caixas de texto poluentes)
     const regions = currentAnalysis.regions || [];
+    const lineWidth = Math.max(1, Math.round(1.2 * scale));
+
     for (const r of regions) {
       const finalLabel = r.review?.label || r.suggestion;
-      let strokeColor = '#5c8ba6', fillColor = 'rgba(92,139,166,0.22)', badgeBg = '#223c4f';
+      let strokeColor = 'rgba(92,139,166,0.8)', fillColor = 'rgba(92,139,166,0.14)';
       if (finalLabel === 'ROOT') {
-        strokeColor = '#20b68a';
-        fillColor = 'rgba(32,182,138,0.25)';
-        badgeBg = '#0e4a36';
+        strokeColor = 'rgba(32,182,138,0.92)';
+        fillColor = 'rgba(32,182,138,0.22)';
       } else if (finalLabel === 'MATRIX') {
-        strokeColor = '#e6a817';
-        fillColor = 'rgba(230,168,23,0.22)';
-        badgeBg = '#543c08';
+        strokeColor = 'rgba(230,168,23,0.85)';
+        fillColor = 'rgba(230,168,23,0.18)';
       } else if (finalLabel === 'ARTIFACT') {
-        strokeColor = '#e05638';
-        fillColor = 'rgba(224,86,56,0.25)';
-        badgeBg = '#4e1b12';
+        strokeColor = 'rgba(224,86,56,0.85)';
+        fillColor = 'rgba(224,86,56,0.22)';
       }
 
       ctx.fillStyle = fillColor;
       ctx.fillRect(r.x, r.y, r.width, r.height);
 
-      ctx.lineWidth = Math.max(2, Math.round(2.5 * scale));
+      ctx.lineWidth = lineWidth;
       ctx.strokeStyle = strokeColor;
       ctx.strokeRect(r.x, r.y, r.width, r.height);
-
-      const labelText = `R${r.ordinal} · ${finalLabel}`;
-      const fontSize = Math.max(12, Math.round(14 * scale));
-      ctx.font = `bold ${fontSize}px sans-serif`;
-      const textWidth = ctx.measureText(labelText).width;
-      const padX = 6 * scale, padY = 3 * scale;
-      const badgeH = fontSize + (padY * 2);
-      const badgeW = textWidth + (padX * 2);
-
-      let badgeX = r.x;
-      let badgeY = r.y - badgeH - 2;
-      if (badgeY < 2) badgeY = r.y + 2;
-
-      ctx.fillStyle = badgeBg;
-      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 1 * scale;
-      ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
-
-      ctx.fillStyle = '#ffffff';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labelText, badgeX + padX, badgeY + (badgeH / 2));
     }
 
-    // 3. Rodapé científico com sumário estatístico
-    ctx.fillStyle = '#0a1d2e';
+    // 3. Legenda científica discreta no canto superior direito
+    const stats = currentAnalysis.statistics || {};
+    const densPct = (w * h) > 0 && stats.total_root_area ? ((stats.total_root_area / (w * h)) * 100).toFixed(3) : '0.000';
+
+    const legendItems = [
+      { label: `Raízes (ROOT): ${stats.root_count || 0}`, color: '#20b68a' }
+    ];
+    if (stats.artifact_count > 0) {
+      legendItems.push({ label: `Artefatos: ${stats.artifact_count}`, color: '#e05638' });
+    }
+    if (stats.matrix_count > 0) {
+      legendItems.push({ label: `Solo / Matriz: ${stats.matrix_count}`, color: '#e6a817' });
+    }
+    if (stats.unknown_count > 0) {
+      legendItems.push({ label: `Não confirmadas: ${stats.unknown_count}`, color: '#5c8ba6' });
+    }
+
+    const legFontSize = Math.max(11, Math.round(12 * scale));
+    ctx.font = `600 ${legFontSize}px sans-serif`;
+    let maxItemW = 0;
+    for (const item of legendItems) {
+      maxItemW = Math.max(maxItemW, ctx.measureText(item.label).width);
+    }
+
+    const legPad = 12 * scale;
+    const legRowH = legFontSize + (8 * scale);
+    const legW = maxItemW + (36 * scale) + (legPad * 2);
+    const legH = (legendItems.length * legRowH) + (26 * scale);
+    const legX = w - legW - (16 * scale);
+    const legY = 16 * scale;
+
+    // Fundo da legenda
+    ctx.fillStyle = 'rgba(7, 30, 56, 0.85)';
+    ctx.beginPath();
+    const radius = 8 * scale;
+    ctx.roundRect ? ctx.roundRect(legX, legY, legW, legH, radius) : ctx.rect(legX, legY, legW, legH);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1 * scale;
+    ctx.stroke();
+
+    // Título da Legenda
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#8cd7ed';
+    ctx.font = `bold ${Math.max(10, Math.round(11 * scale))}px sans-serif`;
+    ctx.fillText('LEGENDA CLASSIFICATÓRIA', legX + legPad, legY + (8 * scale));
+
+    // Itens da Legenda
+    let curY = legY + (24 * scale);
+    for (const item of legendItems) {
+      // Amostra de cor
+      ctx.fillStyle = item.color;
+      ctx.fillRect(legX + legPad, curY + (2 * scale), 12 * scale, 12 * scale);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 0.8 * scale;
+      ctx.strokeRect(legX + legPad, curY + (2 * scale), 12 * scale, 12 * scale);
+
+      // Texto do item
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `600 ${legFontSize}px sans-serif`;
+      ctx.fillText(item.label, legX + legPad + (18 * scale), curY);
+      curY += legRowH;
+    }
+
+    // 4. Rodapé científico com sumário estatístico
+    ctx.fillStyle = '#071e38';
     ctx.fillRect(0, h, w, bannerH);
 
     ctx.strokeStyle = '#20b68a';
-    ctx.lineWidth = Math.max(3, Math.round(3.5 * scale));
+    ctx.lineWidth = Math.max(2, Math.round(3 * scale));
     ctx.beginPath();
     ctx.moveTo(0, h);
     ctx.lineTo(w, h);
     ctx.stroke();
 
-    const titleSize = Math.max(14, Math.round(17 * scale));
-    const subSize = Math.max(11, Math.round(13 * scale));
-    ctx.textBaseline = 'top';
+    const titleSize = Math.max(13, Math.round(16 * scale));
+    const subSize = Math.max(10, Math.round(12 * scale));
 
     ctx.fillStyle = '#45c8f5';
     ctx.font = `bold ${titleSize}px sans-serif`;
@@ -666,14 +706,12 @@ async function exportClassifiedImage(){
 
     ctx.fillStyle = '#eaf2f8';
     ctx.font = `${subSize}px sans-serif`;
-    const meta1 = `Amostra: ${current.sample_id || 'N/A'} | Arquivo: ${current.filename} | Resolução: ${w}x${h} px | SHA-256: ${(current.sha256||'').slice(0, 16)}…`;
+    const meta1 = `Amostra: ${current.sample_id || 'N/A'} | Arquivo: ${current.filename} | Resolução: ${w}×${h} px | SHA-256: ${(current.sha256||'').slice(0, 16)}…`;
     ctx.fillText(meta1, 20 * scale, h + (12 * scale) + titleSize + (5 * scale));
 
-    const stats = currentAnalysis.statistics || {};
-    const densPct = (w * h) > 0 && stats.total_root_area ? ((stats.total_root_area / (w * h)) * 100).toFixed(3) : '0.000';
     ctx.fillStyle = '#2de4ad';
     ctx.font = `bold ${subSize}px sans-serif`;
-    const meta2 = `Raízes: ${stats.root_count || 0} (${number.format(stats.total_root_area || 0)} px² · ${densPct}%) | Solo: ${stats.matrix_count || 0} | Artefatos: ${stats.artifact_count || 0} | Revisão: ${stats.reviewed_count || 0}/${stats.total_regions || regions.length}`;
+    const meta2 = `Raízes: ${stats.root_count || 0} (${number.format(stats.total_root_area || 0)} px² · ${densPct}% da área total) | Solo: ${stats.matrix_count || 0} | Artefatos: ${stats.artifact_count || 0} | Status: Concluído (${stats.reviewed_count || 0}/${stats.total_regions || regions.length})`;
     ctx.fillText(meta2, 20 * scale, h + (12 * scale) + titleSize + subSize + (10 * scale));
 
     canvas.toBlob((blob) => {
