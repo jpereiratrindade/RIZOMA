@@ -199,7 +199,6 @@ void apply_migration_4(sqlite3* db){
  auto run_cols=columns(db,"analysis_runs");
  if(!run_cols.contains("deleted_at"))execute(db,"ALTER TABLE analysis_runs ADD COLUMN deleted_at TEXT");
  if(!run_cols.contains("notes"))execute(db,"ALTER TABLE analysis_runs ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
- execute(db,"PRAGMA foreign_keys=OFF");
  execute(db,R"SQL(
   CREATE TABLE IF NOT EXISTS analysis_runs_v4(
    id TEXT PRIMARY KEY,
@@ -224,7 +223,6 @@ void apply_migration_4(sqlite3* db){
   CREATE INDEX IF NOT EXISTS idx_images_deleted ON images(user_id,deleted_at);
   CREATE INDEX IF NOT EXISTS idx_analysis_runs_deleted ON analysis_runs(image_id,deleted_at);
  )SQL");
- execute(db,"PRAGMA foreign_keys=ON");
 }
 
 void verify_database(sqlite3* db){
@@ -287,7 +285,8 @@ void execute(sqlite3* db,const char* sql){
 
 void migrate(const std::filesystem::path& file){
  Connection connection(file); sqlite3* db=connection.get();
- execute(db,"PRAGMA foreign_keys=ON");
+ execute(db,"PRAGMA foreign_keys=OFF");
+ execute(db,"PRAGMA legacy_alter_table=ON");
  execute(db,"PRAGMA journal_mode=WAL");
  try{
   execute(db,"BEGIN IMMEDIATE");
@@ -349,7 +348,14 @@ void migrate(const std::filesystem::path& file){
   }
   verify_database(db);
   execute(db,"COMMIT");
- }catch(...){sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
+  execute(db,"PRAGMA legacy_alter_table=OFF");
+  execute(db,"PRAGMA foreign_keys=ON");
+ }catch(...){
+  sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,nullptr);
+  execute(db,"PRAGMA legacy_alter_table=OFF");
+  execute(db,"PRAGMA foreign_keys=ON");
+  throw;
+ }
 }
 
 } // namespace rizoma::database
