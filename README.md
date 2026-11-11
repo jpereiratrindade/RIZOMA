@@ -164,3 +164,9 @@ Consultar [`docs/RIZOMA-IMG-FOUNDATION-001.md`](docs/RIZOMA-IMG-FOUNDATION-001.m
 ## Licença
 
 Este projeto é software livre licenciado sob a [GNU General Public License v3.0 (GPLv3)](LICENSE).
+
+## Premissas de desenvolvimento
+
+**Simples, leve. Sempre pronto. Sempre incompleto!**
+
+[Significado e símbolos das premissas](docs/sister-principles/README.md).
